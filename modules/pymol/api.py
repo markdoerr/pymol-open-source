@@ -2,6 +2,7 @@
 
 #--------------------------------------------------------------------
 from .importing import \
+      filename_to_objectname, \
       finish_object,      \
       load,               \
       loadall,            \
@@ -32,6 +33,7 @@ from . import creating
 from .creating import \
       copy,               \
       create,             \
+      curve_new,          \
       extract,            \
       fragment,           \
       group,              \
@@ -98,7 +100,6 @@ from .querying import \
       dist,               \
       dihedral,           \
       distance,           \
-      export_dots,        \
       find_pairs,         \
       get_angle,          \
       get_area,           \
@@ -150,6 +151,7 @@ from .querying import \
       identify,           \
       index,              \
       overlap,            \
+      pi_interactions,    \
       phi_psi
 
 #--------------------------------------------------------------------
@@ -165,7 +167,6 @@ from . import exporting
 from .exporting import \
       copy_image,         \
       cache,              \
-      export_coords,      \
       get_str,            \
       get_bytes,          \
       get_pdbstr,         \
@@ -204,6 +205,7 @@ from .editing import \
       invert,             \
       iterate,            \
       iterate_state,      \
+      look_at,            \
       map_set,            \
       map_set_border,     \
       map_double,         \
@@ -211,7 +213,10 @@ from .editing import \
       map_trim,           \
       matrix_copy,        \
       matrix_reset,       \
+      move_on_curve,      \
       mse2met,            \
+      pbc_unwrap, \
+      pbc_wrap, \
       protect,            \
       push_undo,          \
       rebond,             \
@@ -229,6 +234,7 @@ from .editing import \
       set_dihedral,       \
       set_name,           \
       set_geometry,       \
+      set_discrete,       \
       set_object_color,   \
       set_object_ttt,     \
       set_state_order,    \
@@ -360,11 +366,16 @@ from .viewing import \
       enable,             \
       full_screen,        \
       get_colorection,    \
+      get_clip,           \
       get_view,           \
       get_viewport,       \
       get_vis,            \
       get_scene_list,     \
+      get_scene_thumbnail,\
+      get_scene_message,  \
+      set_scene_message,  \
       hide,               \
+      ipython_image,      \
       label,              \
       label2,             \
       load_png,           \
@@ -432,12 +443,15 @@ from .helping import \
       commands
 
 #--------------------------------------------------------------------
+from .keyboard import \
+      editing_ring
+
+#--------------------------------------------------------------------
 from .experimenting import \
       check,              \
       dump,               \
       get_bond_print,     \
       fast_minimize,      \
-      import_coords,      \
       mem,                \
       minimize,           \
       spheroid,           \

@@ -19,7 +19,6 @@ Z* -------------------------------------------------------------------
 #include"os_gl.h"
 
 #include"Base.h"
-#include"OOMac.h"
 #include"main.h"
 #include"View.h"
 #include"Ray.h"
@@ -105,7 +104,7 @@ int ViewElemXtoFrame(BlockRect *rect, int frames, int x, int nearest)
 }
 
 void ViewElemDrawBox(PyMOLGlobals *G, BlockRect *rect, int first, int last,
-                     int frames, float *color4,int fill ORTHOCGOARG)
+                     int frames, float *color4,int fill , CGO *orthoCGO)
 {  
   if(G->HaveGUI && G->ValidContext && rect) {
     int nDrawn = frames;
@@ -158,7 +157,7 @@ void ViewElemDrawBox(PyMOLGlobals *G, BlockRect *rect, int first, int last,
 void ViewElemDraw(PyMOLGlobals *G,
     const CViewElem * view_elem,
     const BlockRect *rect, int frames,
-    const char *title ORTHOCGOARG)
+    const char *title , CGO *orthoCGO)
 {
   if(G->HaveGUI && G->ValidContext && view_elem) {
     int size = VLAGetSize(view_elem);
@@ -569,9 +568,8 @@ PyObject *ViewElemVLAAsPyList(PyMOLGlobals * G, const CViewElem * vla, int nFram
 
 CView *ViewNew(PyMOLGlobals * G)
 {
-  OOAlloc(G, CView);
+  auto I = new CView();
   I->G = G;
-  I->View = NULL;
   return I;
 }
 
@@ -615,17 +613,29 @@ int ViewIterate(CView * I, CViewIterator * iter, CRay * ray, int at_least_once)
 
       if(elem->pre_flag) {
         /* move the camera to the location we are looking at */
-        GLDOUBLETRANSLATE(elem->pre[0], elem->pre[1], elem->pre[2]);
+#ifdef PURE_OPENGL_ES_2
+        /* TODO */
+#else
+        glTranslated(elem->pre[0], elem->pre[1], elem->pre[2]);
+#endif	
       }
 
       if(elem->matrix_flag) {
         /* rotate about the origin (the the center of rotation) */
-        GLDOUBLEMULTMATRIX(elem->matrix);
+#ifdef PURE_OPENGL_ES_2
+        /* TODO */
+#else
+        glMultMatrixd(elem->matrix);
+#endif
       }
 
       if(elem->post_flag) {
         /* move the origin to the center of rotation */
-	GLDOUBLETRANSLATE(elem->post[0], elem->post[1], elem->post[2]);
+#ifdef PURE_OPENGL_ES_2
+        /* TODO */
+#else
+	glTranslated(elem->post[0], elem->post[1], elem->post[2]);
+#endif
       }
 
     }
@@ -1297,4 +1307,97 @@ int ViewElemInterpolate(PyMOLGlobals * G, CViewElem * first, CViewElem * last,
     dump44f(lastR44f, "last");
 
   return 1;
+}
+
+void TTTToViewElem(float *TTT, CViewElem * elem)
+{
+  float *fp = TTT;
+  double *dp;
+
+  /* convert row-major TTT to column-major ViewElem */
+
+  elem->matrix_flag = true;
+  dp = elem->matrix;
+
+  dp[0] = (double) fp[0];
+  dp[1] = (double) fp[4];
+  dp[2] = (double) fp[8];
+  dp[3] = 0.0;
+
+  dp[4] = (double) fp[1];
+  dp[5] = (double) fp[5];
+  dp[6] = (double) fp[9];
+  dp[7] = 0.0;
+
+  dp[8] = (double) fp[2];
+  dp[9] = (double) fp[6];
+  dp[10] = (double) fp[10];
+  dp[11] = 0.0;
+
+  dp[12] = 0.0;
+  dp[13] = 0.0;
+  dp[14] = 0.0;
+  dp[15] = 1.0;
+
+  /* copy inverse pre */
+
+  elem->pre_flag = true;
+  dp = elem->pre;
+  *(dp++) = (double) -TTT[12];
+  *(dp++) = (double) -TTT[13];
+  *(dp++) = (double) -TTT[14];
+
+  /* copy post */
+
+  elem->post_flag = true;
+  dp = elem->post;
+  *(dp++) = (double) TTT[3];
+  *(dp++) = (double) TTT[7];
+  *(dp++) = (double) TTT[11];
+
+}
+
+void TTTFromViewElem(float *TTT, CViewElem * elem)
+{
+  float *fp = TTT;
+  double *dp;
+
+  if(elem->matrix_flag) {
+    dp = elem->matrix;
+
+    fp[0] = (float) dp[0];
+    fp[1] = (float) dp[4];
+    fp[2] = (float) dp[8];
+    fp[3] = 0.0;
+
+    fp[4] = (float) dp[1];
+    fp[5] = (float) dp[5];
+    fp[6] = (float) dp[9];
+    fp[7] = 0.0;
+
+    fp[8] = (float) dp[2];
+    fp[9] = (float) dp[6];
+    fp[10] = (float) dp[10];
+    fp[11] = 0.0;
+
+    fp[12] = 0.0;
+    fp[13] = 0.0;
+    fp[14] = 0.0;
+    fp[15] = 1.0;
+  }
+
+  if(elem->pre_flag) {
+    dp = elem->pre;
+    fp[12] = (float) (-*(dp++));
+    fp[13] = (float) (-*(dp++));
+    fp[14] = (float) (-*(dp++));
+  }
+
+  if(elem->post_flag) {
+    dp = elem->post;
+    fp[3] = (float) *(dp++);
+    fp[7] = (float) *(dp++);
+    fp[11] = (float) *(dp++);
+  }
+  fp[15] = 1.0F;
 }

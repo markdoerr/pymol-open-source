@@ -24,6 +24,8 @@ expr_sc = ExprShortcut([
     'oneletter',
     'model', 'resv', 'type', 'stereo', 'rank', 'index', 'ss', 'color', 'reps',
     'protons', 'label', 'geom', 'valence', 'flags', 'cartoon',
+    'explicit_degree',
+    'explicit_valence',
 ])
 
 
@@ -73,6 +75,7 @@ def get_auto_arg_list(self_cmd=cmd):
     aa_ramp_c = [ lambda:
             cmd.Shortcut(self_cmd.get_names_of_type('object:ramp')),
             'ramp', '' ]
+    aa_scene_e = [lambda: cmd.Shortcut(cmd.get_scene_list()), 'scene', '']
 
     return [
 # 1st
@@ -147,7 +150,10 @@ def get_auto_arg_list(self_cmd=cmd):
         'orient'         : aa_sel_e,
         'origin'         : aa_sel_e,
         'pair_fit'       : aa_sel_c,
+        'pbc_unwrap'     : aa_obj_e,
+        'pbc_wrap'       : aa_obj_e,
         'protect'        : aa_sel_e,
+        'pi_interactions': aa_obj_e,
         'pseudoatom'     : aa_obj_c,
         'ramp_new'       : aa_ramp_c,
         'ramp_update'    : aa_ramp_c,
@@ -156,8 +162,10 @@ def get_auto_arg_list(self_cmd=cmd):
         'reference'      : [ self_cmd.editing.ref_action_sc  , 'action'          , ', ' ],
         'remove'         : aa_sel_e,
         'reinitialize'   : [ self_cmd.commanding.reinit_sc   , 'option'          , ''   ],
-        'scene'          : [ self_cmd._pymol._scene_dict_sc  , 'scene'           , ''   ],
+        'scene'          : aa_scene_e,
         'sculpt_activate': aa_obj_e,
+        'sculpt_deactivate': aa_obj_e,
+        'sculpt_iterate' : aa_obj_c,
         'set'            : aa_set_c,
         'set_bond'       : aa_set_c,
         'set_key'        : [ lambda: cmd.Shortcut(cmd.key_mappings), 'key'       , ', ' ],
@@ -197,7 +205,7 @@ def get_auto_arg_list(self_cmd=cmd):
         'as'             : aa_sel_e,
         'bond'           : aa_sel_e,
         'button'         : [ self_cmd.controlling.but_mod_sc , 'modifier'        , ', ' ],
-        'cache'          : [ self_cmd._pymol._scene_dict_sc  , 'scene'           , ''   ],
+        'cache'          : aa_scene_e,
         'cealign'        : aa_sel_e,
         'clean'          : aa_sel_e,
         'color'          : aa_sel_e,
@@ -237,6 +245,7 @@ def get_auto_arg_list(self_cmd=cmd):
         'multifilesave'  : aa_sel_c,
         'order'          : [ self_cmd.boolean_sc             , 'sort'            , ', ' ],
         'pair_fit'       : aa_sel_c,
+        'pi_interactions': aa_sel_e,
         'rebuild'        : aa_rep_c,
         'reference'      : aa_sel_c,
         'scene'          : [ self_cmd.viewing.scene_action_sc, 'scene action'    , ', ' ],
@@ -273,6 +282,7 @@ def get_auto_arg_list(self_cmd=cmd):
         'map_set'        : [ self_cmd.map_sc                 , 'map'             , ' '  ],
         'morph'          : aa_sel_e,
         'order'          : [ self_cmd.controlling.location_sc, 'location'        , ', ' ],
+        'pi_interactions': aa_sel_e,
         'ramp_update'    : [ self_cmd.creating.ramp_spectrum_sc , 'ramp color spectrum' , ', ' ],
         'set'            : aa_sel_c,
         'set_bond'       : aa_sel_c,

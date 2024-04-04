@@ -51,6 +51,7 @@
 #include "Control.h"
 #include "Movie.h"
 #include "Executive.h"
+#include "Feedback.h"
 
 int _gScaleFactor = 1;
 
@@ -783,6 +784,9 @@ void MainReshape(int width, int height)
 
 
 /*========================================================================*/
+/**
+ * only called from CmdViewport(), and only with !_PYMOL_NO_MAIN
+ */
 void MainDoReshape(int width, int height)
 {                               /* called internally */
   int internal_feedback;
@@ -1249,6 +1253,11 @@ static void launch(CPyMOLOptions * options, int own_the_options)
   PyMOLInstance = PyMOL_NewWithOptions(options);
   G = PyMOL_GetGlobals(PyMOLInstance);
 
+  G->HaveGUI = options->pmgui;
+
+  assert(!SingletonPyMOLGlobals);
+  SingletonPyMOLGlobals = G;
+
   if(G->Option->multisample)
     multisample_mask = P_GLUT_MULTISAMPLE;
 
@@ -1277,7 +1286,7 @@ static void launch(CPyMOLOptions * options, int own_the_options)
 #endif
 
     int myArgc = 0;
-    char *myArgv[8] = {"pymol"};
+    char* myArgv[8] = {strdup("pymol")};
     p_glutInit(&myArgc, myArgv);
 
     {
@@ -1445,20 +1454,7 @@ static void launch(CPyMOLOptions * options, int own_the_options)
 
 /*========================================================================*/
 
-static int main_common(void);
 static int decoy_input_hook(void) { return 0; }
-
-int main_exec(int argc, char **argv)
-{
-  PyMOLGlobals *G = SingletonPyMOLGlobals;
-
-  fflush(stdout);
-  PSetupEmbedded(G, argc, argv);
-
-  return PyRun_SimpleString(
-      "import pymol\n"
-      "pymol.launch()\n");
-}
 
 int main_shared(int block_input_hook)
 {
@@ -1469,11 +1465,6 @@ int main_shared(int block_input_hook)
   dlopen("libGL.so.1", RTLD_LAZY | RTLD_GLOBAL);
 #endif
 
-  return main_common();
-}
-
-static int main_common(void)
-{
   {                             /* no matter how PyMOL was built, we always come through here... */
 
     CPyMOLOptions *options = PyMOLOptions_New();

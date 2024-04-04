@@ -19,11 +19,14 @@ Z* -------------------------------------------------------------------
 
 #include <memory>
 #include <vector>
+#include <glm/glm.hpp>
+#include <glm/gtc/type_ptr.hpp>
 
 #include"Base.h"
 #include"Basis.h"
 #include"PyMOLGlobals.h"
 #include"Image.h"
+#include"RenderContext.h"
 
 #define cRayMaxBasis 10
 
@@ -35,8 +38,8 @@ CRay *RayNew(PyMOLGlobals * G, int antialias);
 void RayFree(CRay * I);
 void RayPrepare(CRay * I, float v0, float v1, float v2,
                 float v3, float v4, float v5,
-                float fov, float *pos,
-                float *mat, float *rotMat,
+                float fov, glm::vec3 pos,
+                float *mat, const glm::mat4& rotMat,
                 float aspRat, int width, int height,
                 float pixel_scale, int ortho, float pixel_ratio,
                 float back_ratio, float magnified);
@@ -64,7 +67,7 @@ void RaySetTTT(CRay * I, int flag, float *ttt);
 void RayGetTTT(CRay * I, float *ttt);
 void RayPushTTT(CRay * I);
 void RayPopTTT(CRay * I);
-void RaySetContext(CRay * I, int context);
+void RaySetContext(CRay * I, pymol::RenderContext context);
 void RayRenderColorTable(CRay * I, int width, int height, int *image);
 int RayTraceThread(CRayThreadInfo * T);
 int RayGetNPrimitives(CRay * I);
@@ -94,9 +97,9 @@ G3dPrimitive *RayRenderG3d(CRay * I, int width, int height, float front,
 
 namespace cgo{
 namespace draw{
-  class cylinder;
-  class custom_cylinder;
-  class custom_cylinder_alpha;
+  struct cylinder;
+  struct custom_cylinder;
+  struct custom_cylinder_alpha;
 }
 };
 
@@ -109,13 +112,13 @@ struct _CRay {
   int customCylinder3fv(const cgo::draw::custom_cylinder &cyl, const float alpha1, const float alpha2);
   int customCylinder3fv(const cgo::draw::custom_cylinder &cyl);
   int customCylinder3fv(const float *v1, const float *v2, float r, const float *c1,
-                        const float *c2, const int cap1, const int cap2,
+                        const float *c2, const cCylCap cap1, const cCylCap cap2,
                         const float alpha1, const float alpha2);
   int customCylinder3fv(const float *v1, const float *v2, float r, const float *c1,
-                        const float *c2, const int cap1, const int cap2);
+                        const float *c2, const cCylCap cap1, const cCylCap cap2);
   int customCylinderAlpha3fv(const cgo::draw::custom_cylinder_alpha &cyl);
   int cone3fv(const float *v1, const float *v2, float r1, float r2, const float *c1,
-		   const float *c2, int cap1, int cap2);
+		   const float *c2, cCylCap cap1, cCylCap cap2);
   int sausage3fv(const float *v1, const float *v2, float r, const float *c1, const float *c2);
   void color3fv(const float *c);
   int triangle3fv(
@@ -139,11 +142,11 @@ struct _CRay {
   int NPrimitive;
   CBasis *Basis;
   int NBasis;
-  int *Vert2Prim;
+  std::vector<int> Vert2Prim;
   float CurColor[3], IntColor[3];
   float ModelView[16];
   float ProMatrix[16];
-  float Rotation[16];
+  glm::mat4 Rotation;
   float Volume[6];
   float Range[3];
   int BigEndian;
@@ -152,10 +155,9 @@ struct _CRay {
   float Trans;
   float Random[256];
   int TTTFlag;
-  float TTT[16];
-  float *TTTStackVLA;
-  int TTTStackDepth;
-  int Context;
+  glm::mat4 TTT;
+  std::vector<glm::mat4> TTTStack;
+  pymol::RenderContext context;
   int CheckInterior;
   float AspRatio;
   int Width, Height;
@@ -169,7 +171,8 @@ struct _CRay {
   float FrontBackRatio;
   double PrimSize;
   int PrimSizeCnt;
-  float Fov, Pos[3];
+  float Fov;
+  glm::vec3 Pos;
   std::shared_ptr<pymol::Image> bkgrd_data;
 
 private:

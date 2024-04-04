@@ -21,7 +21,7 @@ Z* -------------------------------------------------------------------
 #include"os_gl.h"
 
 #include"Base.h"
-#include"OOMac.h"
+#include"Err.h"
 #include"RepLabel.h"
 #include"Color.h"
 #include"Map.h"
@@ -32,8 +32,9 @@ Z* -------------------------------------------------------------------
 #include"Matrix.h"
 #include"ShaderMgr.h"
 #include"CGO.h"
+#include"CoordSet.h"
 
-/*
+/**
  * Memory layout of the RepLabel::V array
  */
 struct VItemType {
@@ -69,37 +70,33 @@ struct VItemType {
   float connector_ext_len;  // 27: label_connector_ext_length
 };
 
-typedef struct RepLabel {
-  Rep R;
+struct RepLabel : Rep {
+  using Rep::Rep;
+
+  ~RepLabel() override;
+
+  cRep_t type() const override { return cRepLabel; }
+  void render(RenderInfo* info) override;
+
   // VItemType *V;
-  float *V;
-  lexidx_t *L;
+  float* V = nullptr;
+  lexidx_t* L = nullptr;
   int N;
   int OutlineColor;
-  CGO *shaderCGO;
-  int texture_font_size;
-} RepLabel;
+  CGO* shaderCGO = nullptr;
+  int texture_font_size = 0;
+};
 
 #define SHADERCGO I->shaderCGO
 
 #include"ObjectMolecule.h"
 
-static void RepLabelInit(RepLabel *I)
+RepLabel::~RepLabel()
 {
-  I->shaderCGO = NULL;
-  I->texture_font_size = 0;
-}
-
-static
-void RepLabelFree(RepLabel * I)
-{
-  RepPurge(&I->R);
+  auto I = this;
   FreeP(I->V);
   FreeP(I->L);
-  if (I->shaderCGO){
-    CGOFree(I->shaderCGO);
-  }
-  OOFreeP(I);
+  CGOFree(I->shaderCGO);
 }
 
 #define MAX_LABEL_TEXTURE_SIZE 256
@@ -706,7 +703,7 @@ typedef struct lineSeg_s {
 
 static void RepLabelRenderRayBackground(RepLabel * I, RenderInfo * info, float *v, int draw_var){
   CRay *ray = info->ray;
-  PyMOLGlobals *G = I->R.G;
+  PyMOLGlobals *G = I->G;
   float *screenWorldOffset = TextGetScreenWorldOffset(G);
   float text_width = TextGetWidth(G), text_height = TextGetHeight(G);
   float *indentFactor = TextGetIndentFactor(G);
@@ -718,11 +715,11 @@ static void RepLabelRenderRayBackground(RepLabel * I, RenderInfo * info, float *
   short drawLine = true;
   float xn[3], yn[3], zn[3];
   float connector_width = *(v + 26);
-  float *RotMatrix = ray->Rotation;
+  float *RotMatrix = glm::value_ptr(ray->Rotation);
   lineSeg_t labelTop, labelBottom, labelLeft, labelRight;
   short label_con_flat = 128 & (int)*(v + 21);
   short label_connector_mode = (draw_var & 8) ? 1 : (draw_var & 16) ? 2 : (draw_var & 32) ? 3 : (draw_var & 64) ? 4 : 0;
-  float font_size = SettingGet_f(G, I->R.cs->Setting, I->R.obj->Setting,
+  float font_size = SettingGet_f(G, I->cs->Setting.get(), I->obj->Setting.get(),
                                  cSetting_label_size);
   float tCenter[4], sCenter[4], sTarget[4];
   short relativeMode = ((short)*(v + 15));
@@ -1111,14 +1108,14 @@ static void RepLabelRenderRayBackground(RepLabel * I, RenderInfo * info, float *
 static
 void RepLabelRenderRay(RepLabel * I, RenderInfo * info){
 #ifndef _PYMOL_NO_RAY
-  PyMOLGlobals *G = I->R.G;
+  PyMOLGlobals *G = I->G;
   CRay *ray = info->ray;
   int c = I->N;
   float *v = I->V;
   lexidx_t *l = I->L;
-  int font_id = SettingGet_i(G, I->R.cs->Setting, I->R.obj->Setting,
+  int font_id = SettingGet_i(G, I->cs->Setting.get(), I->obj->Setting.get(),
                              cSetting_label_font_id);
-  float font_size = SettingGet_f(G, I->R.cs->Setting, I->R.obj->Setting,
+  float font_size = SettingGet_f(G, I->cs->Setting.get(), I->obj->Setting.get(),
                                  cSetting_label_size);
   if(c) {
     const char *st;
@@ -1171,27 +1168,27 @@ void RepLabelRenderRay(RepLabel * I, RenderInfo * info){
 #endif
 }
 
-static void RepLabelRender(RepLabel * I, RenderInfo * info)
+void RepLabel::render(RenderInfo* info)
 {
+  auto I = this;
   CRay *ray = info->ray;
   auto pick = info->pick;
-  PyMOLGlobals *G = I->R.G;
   float *v = I->V;
   int c = I->N;
   lexidx_t *l = I->L;
-  int font_id = SettingGet_i(G, I->R.cs->Setting, I->R.obj->Setting,
+  int font_id = SettingGet_i(G, I->cs->Setting.get(), I->obj->Setting.get(),
                              cSetting_label_font_id);
-  float font_size = SettingGet_f(G, I->R.cs->Setting, I->R.obj->Setting,
+  float font_size = SettingGet_f(G, I->cs->Setting.get(), I->obj->Setting.get(),
                                  cSetting_label_size);
-  int float_text = SettingGet_i(G, I->R.cs->Setting, I->R.obj->Setting,
+  int float_text = SettingGet_i(G, I->cs->Setting.get(), I->obj->Setting.get(),
 				cSetting_float_labels);
-  if (!(ray || pick) && info->pass >= 0)
+  if (!(ray || pick) && info->pass != RenderPass::Transparent)
     return;
 
-  if(I->R.MaxInvalid >= cRepInvRep){
+  if(I->MaxInvalid >= cRepInvRep){
     return;
   }
-  font_id = SettingCheckFontID(G, I->R.cs->Setting, I->R.obj->Setting, font_id);
+  font_id = SettingCheckFontID(G, I->cs->Setting.get(), I->obj->Setting.get(), font_id);
 
   if (I->shaderCGO && font_size < 0.f){
     int size;
@@ -1204,18 +1201,18 @@ static void RepLabelRender(RepLabel * I, RenderInfo * info)
     RepLabelRenderRay(I, info);
   } else if(G->HaveGUI && G->ValidContext) {
     if(pick) {
-      int pick_labels = SettingGet_b(G, I->R.cs->Setting, I->R.obj->Setting, cSetting_pick_labels);
+      int pick_labels = SettingGet_b(G, I->cs->Setting.get(), I->obj->Setting.get(), cSetting_pick_labels);
       if (!pick_labels)
 	return;
       if (I->shaderCGO){
         if(float_text)
           glDisable(GL_DEPTH_TEST);
-	CGORenderGLPicking(I->shaderCGO, info, &I->R.context, I->R.cs->Setting, I->R.obj->Setting);
+	CGORenderPicking(I->shaderCGO, info, &I->context, I->cs->Setting.get(), I->obj->Setting.get());
         if(float_text)
           glEnable(GL_DEPTH_TEST);
 	return;
       } else {
-        Pickable *p = I->R.P;
+        Pickable *p = I->P;
         TextSetIsPicking(G, true);
         SceneSetupGLPicking(G);
         if(c) {
@@ -1235,7 +1232,7 @@ static void RepLabelRender(RepLabel * I, RenderInfo * info)
               copy3f(v + 6, tCenterPt);
               SceneGetCenter(G, offpt);
               TextSetPosNColor(G, offpt, v);
-              SceneGetScaledAxes(G, I->R.obj, xn, yn);
+              SceneGetScaledAxes(G, I->obj, xn, yn);
               if (!I->shaderCGO){
                 if (relativeMode & 2){ // label_relative_mode = 1
                   float tmp3f[3];
@@ -1260,7 +1257,7 @@ static void RepLabelRender(RepLabel * I, RenderInfo * info)
               if (p) {
                 p++;
                 AssignNewPickColor(nullptr, pick, TextGetColorUChar4uv(G),
-                    &I->R.context, p->index, p->bond);
+                    &I->context, p->index, p->bond);
               }
 
               TextSetColorFromUColor(G);
@@ -1290,7 +1287,7 @@ static void RepLabelRender(RepLabel * I, RenderInfo * info)
 	float yn[3] = { 0.0F, 1.0F, 0.0F };
 	int pre_use_shaders = info->use_shaders;
 	
-	Pickable *p = I->R.P;
+	Pickable *p = I->P;
 	use_shader = SettingGetGlobal_b(G, cSetting_use_shaders)
 #ifdef _PYMOL_IOS
           ;
@@ -1306,7 +1303,7 @@ static void RepLabelRender(RepLabel * I, RenderInfo * info)
 	    info->texture_font_size = I->texture_font_size;
 	    if(float_text)
 	      glDisable(GL_DEPTH_TEST);
-	    CGORenderGL(I->shaderCGO, NULL, NULL, NULL, info, &I->R);
+	    CGORender(I->shaderCGO, NULL, NULL, NULL, info, I);
 	    if(float_text)
 	      glEnable(GL_DEPTH_TEST);
 	    return;
@@ -1340,7 +1337,7 @@ static void RepLabelRender(RepLabel * I, RenderInfo * info)
 	    copy3f(v + 6, tCenterPt);
 	    SceneGetCenter(G, offpt);
 	    TextSetPosNColor(G, offpt, v);
-	    SceneGetScaledAxes(G, I->R.obj, xn, yn);
+	    SceneGetScaledAxes(G, I->obj, xn, yn);
 	    if (!I->shaderCGO){
 	      if (relativeMode & 2){ // label_relative_mode = 1
 		  float tmp3f[3];
@@ -1484,7 +1481,7 @@ static void RepLabelRender(RepLabel * I, RenderInfo * info)
 	  I->shaderCGO = totalCGO;
 	  if (I->shaderCGO){
 	    I->shaderCGO->use_shader = true;
-	    RepLabelRender(I, info);
+	    I->render(info); // recursion !?
 	    return;
 	  }
         } else {
@@ -1503,10 +1500,10 @@ static void RepLabelRender(RepLabel * I, RenderInfo * info)
 
 Rep *RepLabelNew(CoordSet * cs, int state)
 {
-  PyMOLGlobals *G = cs->State.G;
+  PyMOLGlobals *G = cs->G;
   ObjectMolecule *obj;
   int a, a1, c1;
-  float *v, *v0;
+  float *v;
   const float *vc;
   lexidx_t *l;
   int label_color;
@@ -1517,20 +1514,10 @@ Rep *RepLabelNew(CoordSet * cs, int state)
   if(!cs->hasRep(cRepLabelBit))
     return NULL;
 
-  OOAlloc(G, RepLabel);
-  RepLabelInit(I);
+  auto I = new RepLabel(cs, state);
   obj = cs->Obj;
 
-  label_color = SettingGet_i(G, cs->Setting, obj->Setting, cSetting_label_color);
-  RepInit(G, &I->R);
-
-  I->R.fRender = (void (*)(struct Rep *, RenderInfo *)) RepLabelRender;
-  I->R.fFree = (void (*)(struct Rep *)) RepLabelFree;
-  I->R.fRecolor = NULL;
-  I->R.obj = (CObject *) obj;
-  I->R.cs = cs;
-  I->R.context.object = obj;
-  I->R.context.state = state;
+  label_color = SettingGet_i(G, cs->Setting.get(), obj->Setting.get(), cSetting_label_color);
 
   /* raytracing primitives */
 
@@ -1540,12 +1527,12 @@ Rep *RepLabelNew(CoordSet * cs, int state)
   ErrChkPtr(G, I->V);
 
   I->OutlineColor =
-    SettingGet_color(G, cs->Setting, obj->Setting, cSetting_label_outline_color);
+    SettingGet_color(G, cs->Setting.get(), obj->Setting.get(), cSetting_label_outline_color);
 
-  if(SettingGet_b(G, cs->Setting, obj->Setting, cSetting_pickable)) {
-    I->R.P = pymol::malloc<Pickable>(cs->NIndex + 1);
-    ErrChkPtr(G, I->R.P);
-    rp = I->R.P + 1;            /* skip first record! */
+  if(SettingGet_b(G, cs->Setting.get(), obj->Setting.get(), cSetting_pickable)) {
+    I->P = pymol::malloc<Pickable>(cs->NIndex + 1);
+    ErrChkPtr(G, I->P);
+    rp = I->P + 1;            /* skip first record! */
   }
 
   I->N = 0;
@@ -1572,7 +1559,7 @@ Rep *RepLabelNew(CoordSet * cs, int state)
       *(v++) = *(vc++);
       *(v++) = *(vc++);
 
-      v0 = cs->Coord + 3 * a;
+      const float* v0 = cs->coordPtr(a);
       *(v++) = *(v0++);
       *(v++) = *(v0++);
       *(v++) = *(v0++);
@@ -1681,14 +1668,14 @@ Rep *RepLabelNew(CoordSet * cs, int state)
     I->V = ReallocForSure(I->V, float, (v - I->V));
     I->L = ReallocForSure(I->L, lexidx_t, (l - I->L));
     if(rp) {
-      I->R.P = ReallocForSure(I->R.P, Pickable, (rp - I->R.P));
-      I->R.P[0].index = I->N;   /* unnec? */
+      I->P = ReallocForSure(I->P, Pickable, (rp - I->P));
+      I->P[0].index = I->N;   /* unnec? */
     }
   } else {
     I->V = ReallocForSure(I->V, float, 1);
     I->L = ReallocForSure(I->L, lexidx_t, 1);
     if(rp) {
-      FreeP(I->R.P);
+      FreeP(I->P);
     }
   }
   return (Rep *) I;

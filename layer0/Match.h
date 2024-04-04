@@ -19,18 +19,20 @@ Z* -------------------------------------------------------------------
 #ifndef _H_Match
 #define _H_Match
 
-#include "PyMOLGlobals.h"
+struct PyMOLGlobals;
 
-typedef struct {
-  PyMOLGlobals *G;
-  float **smat;
-  float **mat;
-  float **da, **db;
-  int na, nb;
-  int *pair;
-  float score;                  /* result */
-  int n_pair;
-} CMatch;
+struct CMatch {
+  PyMOLGlobals* G{};
+  float** smat{};
+  float** mat{};
+  float** da;
+  float** db{};
+  int na{};
+  int nb{};
+  int* pair{};
+  float score{}; /* result */
+  int n_pair{};
+};
 
 CMatch *MatchNew(PyMOLGlobals * G, unsigned int na, unsigned int nb, int dist_mats);
 int MatchResidueToCode(CMatch * I, int *vla, int n);

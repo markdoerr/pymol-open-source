@@ -232,7 +232,7 @@ std::string UtilCleanStdStr(const std::string& s)
   return ret;
 }
 
-/*
+/**
  * Remove ANSI Escape sequences in-place
  */
 void UtilStripANSIEscapes(char *s)
@@ -462,7 +462,7 @@ int UtilSemiSortFloatIndexWithNBinsImpl(int *start1, int n, int nbins, float *ar
   /* 9/9/14: BB - added start1 and nbins argument
      start1 - pre-allocated memory
      nbins - allows the first array to be controled as the number of bins, 
-             to match how CGORenderGLAlpha() sorts its triangles.
+             to match how CGORenderAlpha() sorts its triangles.
   */
   int ok = true;
   if(n>0) {

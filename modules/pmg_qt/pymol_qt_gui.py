@@ -3,8 +3,6 @@ Contains main class for PyMOL QT GUI
 """
 
 
-from __future__ import absolute_import
-from __future__ import print_function
 from collections import defaultdict
 import os
 import re
@@ -12,10 +10,11 @@ import sys
 
 import pymol
 import pymol._gui
-from pymol import colorprinting
+from pymol import colorprinting, save_shortcut
 
 from pymol.Qt import QtGui, QtCore, QtWidgets
 from pymol.Qt.utils import (getSaveFileNameWithExt, UpdateLock, WidgetMenu,
+        MainThreadCaller,
         PopupOnException,
         connectFontContextMenu, getMonospaceFont)
 
@@ -103,8 +102,10 @@ class PyMOLQtGUI(QtWidgets.QMainWindow, pymol._gui.PyMOLDesktopGUI):
         # reusable dialogs
         self.dialog_png = None
         self.advanced_settings_dialog = None
-        self.props_dialog = None
+        self.props_panel = None
         self.builder = None
+        self.shortcut_menu_filter_dialog = None
+        self.scene_panel_dialog = None
 
         # setting index -> callable
         self.setting_callbacks = defaultdict(list)
@@ -413,6 +414,9 @@ PyMOL> color ye<TAB>    (will autocomplete "yellow")
         if style:
             self.setStyleSheet(style)
 
+        # Load saved shortcuts on launch
+        self.saved_shortcuts = pymol.save_shortcut.load_and_set(self.cmd)
+
     def lineeditKeyPressEventFilter(self, watched, event):
         key = event.key()
         if key == Qt.Key_Tab:
@@ -478,7 +482,8 @@ PyMOL> color ye<TAB>    (will autocomplete "yellow")
 
         if toggle:
             self.menubar.hide()
-            self.ext_window.hide()
+            if not self.ext_window.isFloating():
+                self.ext_window.hide()
             self.showFullScreen()
             self.pymolwidget.setFocus()
         else:
@@ -538,13 +543,6 @@ PyMOL> color ye<TAB>    (will autocomplete "yellow")
         form._dialog = dialog
         return form
 
-    def open_props_dialog(self):  #noqa
-        if not self.props_dialog:
-            self.props_dialog = properties_dialog.props_dialog(self)
-
-        self.props_dialog.show()
-        self.props_dialog.raise_()
-
     def edit_colors_dialog(self):
         form = self.load_form('colors')
         form.list_colors.setSortingEnabled(True)
@@ -575,9 +573,9 @@ PyMOL> color ye<TAB>    (will autocomplete "yellow")
             R = form.input_R.value()
             G = form.input_G.value()
             B = form.input_B.value()
-            form.slider_R.setValue(R * 100)
-            form.slider_G.setValue(G * 100)
-            form.slider_B.setValue(B * 100)
+            form.slider_R.setValue(round(R * 100))
+            form.slider_G.setValue(round(G * 100))
+            form.slider_B.setValue(round(B * 100))
             form.frame_color.setStyleSheet(
                 "background-color: rgb(%d,%d,%d)" % (
                     R * 0xFF, G * 0xFF, B * 0xFF))
@@ -622,6 +620,15 @@ PyMOL> color ye<TAB>    (will autocomplete "yellow")
 
         self.builder.show()
         self.builder.raise_()
+
+    def open_props_dialog(self):
+        from .properties_dialog import PropsDialog
+
+        if not self.props_panel:
+            self.props_panel = PropsDialog(self)
+
+        self.props_panel.get_dialog().show()
+        self.props_panel.get_dialog().raise_()
 
     def edit_pymolrc(self):
         from . import TextEditor
@@ -776,6 +783,7 @@ PyMOL> color ye<TAB>    (will autocomplete "yellow")
         if widget is None:
             form._dialog.show()
 
+    @PopupOnException.decorator
     def _file_save(self, filter, format):
         fname = getSaveFileNameWithExt(
             self,
@@ -859,7 +867,7 @@ PyMOL> color ye<TAB>    (will autocomplete "yellow")
         self.cmd.cd(dname or '.', quiet=0)
 
     def confirm_quit(self):
-        QtWidgets.qApp.quit()
+        QtWidgets.QApplication.instance().quit()
 
     def settings_edit_all_dialog(self):
         from .advanced_settings_gui import PyMOLAdvancedSettings
@@ -868,11 +876,25 @@ PyMOL> color ye<TAB>    (will autocomplete "yellow")
                                                                   self.cmd)
         self.advanced_settings_dialog.show()
 
+    def shortcut_menu_edit_dialog(self):
+        from .shortcut_menu_gui import PyMOLShortcutMenu
+        if self.shortcut_menu_filter_dialog is None:
+            self.shortcut_menu_filter_dialog = PyMOLShortcutMenu(self, self.saved_shortcuts, self.cmd)
+        self.shortcut_menu_filter_dialog.show()
+
+    def scene_panel_menu_dialog(self):
+        from .scene_bin_gui import ScenePanel
+
+        if self.scene_panel_dialog is None:
+            self.scene_panel_dialog = ScenePanel(self)
+
+        self.scene_panel_dialog.show()
+
     def show_about(self):
         msg = [
             'The PyMOL Molecular Graphics System\n',
             'Version %s' % (self.cmd.get_version()[0]),
-            u'Copyright (C) Schr\xF6dinger LLC.',
+            u'Copyright (C) Schr\xF6dinger, LLC.',
             'All rights reserved.\n',
             'License information:',
         ]
@@ -891,12 +913,8 @@ PyMOL> color ye<TAB>    (will autocomplete "yellow")
     # GUI callbacks
     #################
 
-    if sys.version_info[0] < 3:
-        def command_get(self):
-            return self.lineedit.text().encode('utf-8')
-    else:
-        def command_get(self):
-            return self.lineedit.text()
+    def command_get(self):
+        return self.lineedit.text()
 
     def command_set(self, v):
         return self.lineedit.setText(v)
@@ -1213,6 +1231,16 @@ def execapp():
     pymol.gui.createlegacypmgapp = window.createlegacypmgapp
 
     pymol.cmd._copy_image = _copy_image
+    pymol.cmd._call_in_gui_thread = MainThreadCaller()
+
+    # Assume GUI thread, make OpenGL context current before calling func().
+    def _call_with_opengl_context_gui_thread(func):
+        with window.pymolwidget:
+            return func()
+
+    # Dispatch to GUI thread and make OpenGL context current before calling func().
+    pymol.cmd._call_with_opengl_context = lambda func: pymol.cmd._call_in_gui_thread(
+        lambda: _call_with_opengl_context_gui_thread(func))
 
     window.show()
     window.raise_()

@@ -12,8 +12,6 @@
 #-*
 #Z* -------------------------------------------------------------------
 
-from __future__ import print_function
-
 if True:
 
     import pymol
@@ -23,10 +21,7 @@ if True:
           _feedback,fb_module,fb_mask, \
           DEFAULT_ERROR, DEFAULT_SUCCESS, _raising, is_ok, is_error
 
-    try:
-        import cPickle
-    except ImportError:
-        import pickle as cPickle
+    import pickle as cPickle
     import traceback
 
     class WizardError(Exception):
@@ -49,6 +44,9 @@ if True:
                     kwd['_self']=_self
                     try:
                         wiz = getattr(mod_obj,oname)(*arg, **kwd)
+                    except TypeError as e:
+                        # e.g. missing argument
+                        raise pymol.CmdException(str(e))
                     except WizardError as e:
                         from pymol.wizard.message import Message
                         wiz = Message("Error: %s" % str(e), _self=_self)
@@ -61,7 +59,7 @@ if True:
                 print("Error: Sorry, couldn't import the '"+name+"' wizard.")
         return r
 
-    def wizard(name=None,*arg,**kwd):
+    def wizard(name=None, *arg, _self=cmd, **kwd):
         '''
 DESCRIPTION
 
@@ -81,7 +79,6 @@ EXAMPLE
 
     wizard distance  # launches the distance measurement wizard
     '''
-        _self = kwd.get('_self',cmd)
         r = DEFAULT_ERROR
         if name is None:
             _self.set_wizard()
@@ -94,14 +91,13 @@ EXAMPLE
         if _self._raising(r,_self): raise pymol.CmdException
         return r
 
-    def replace_wizard(name=None,*arg,**kwd):
+    def replace_wizard(name=None, *arg, _self=cmd, **kwd):
         '''
 DESCRIPTION
 
     "replace_wizard" is an unsupported internal command.
     
     '''
-        _self = kwd.get('_self',cmd)
         r = DEFAULT_ERROR
         if name is None:
             _self.set_wizard()

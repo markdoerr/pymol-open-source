@@ -19,11 +19,10 @@ Z* -------------------------------------------------------------------
 
 #include"os_python.h"
 
-#include"PyMOLObject.h"
+#include "ObjectGadget.h"
 
-#include"GadgetSet.h"
-#include"ObjectMap.h"
-#include"ObjectMolecule.h"
+struct ObjectMap;
+struct ObjectMolecule;
 
 #define cRampNone 0
 #define cRampMap 1
@@ -33,9 +32,9 @@ struct ObjectGadgetRamp : public ObjectGadget {
   int RampType = 0;
 
   int NLevel = 0;
-  float *Level = nullptr;
-  float *LevelTmp = nullptr;
-  float *Color = nullptr;
+  pymol::vla<float> Level;
+  pymol::vla<float> LevelTmp;
+  pymol::vla<float> Color;
   int var_index = 0;
 
   /* cRampMap */
@@ -64,7 +63,7 @@ struct ObjectGadgetRamp : public ObjectGadget {
 
   // virtual methods
   void update() override;
-  void invalidate(int rep, int level, int state) override;
+  void invalidate(cRep_t rep, cRepInv_t level, int state) override;
 };
 
 #define cRAMP_TRADITIONAL 1
@@ -79,7 +78,8 @@ struct ObjectGadgetRamp : public ObjectGadget {
 ObjectGadgetRamp *ObjectGadgetRampMapNewAsDefined(PyMOLGlobals * G,
                                                   ObjectGadgetRamp *I,
                                                   ObjectMap * map,
-                                                  float *level_vla, float *color_vla,
+                                                  pymol::vla<float>&& level_vla,
+                                                  pymol::vla<float>&& color_vla,
                                                   int map_state, float *vert_vla,
                                                   float beyond, float within, float sigma,
                                                   int zero, int calc_mode);
@@ -87,8 +87,8 @@ ObjectGadgetRamp *ObjectGadgetRampMapNewAsDefined(PyMOLGlobals * G,
 ObjectGadgetRamp *ObjectGadgetRampMolNewAsDefined(PyMOLGlobals * G,
                                                   ObjectGadgetRamp *I,
                                                   ObjectMolecule * mol,
-                                                  float *level_vla,
-                                                  float *color_vla,
+                                                  pymol::vla<float>&& level_vla,
+                                                  pymol::vla<float>&& color_vla,
                                                   int mol_state, int calc_mode);
 
 int ObjectGadgetRampInterpolate(ObjectGadgetRamp * I, float level, float *color);
@@ -97,7 +97,7 @@ int ObjectGadgetRampInterVertex(ObjectGadgetRamp * I, const float *pos, float *c
 
 PyObject *ObjectGadgetRampAsPyList(ObjectGadgetRamp * I);
 int ObjectGadgetRampNewFromPyList(PyMOLGlobals * G, PyObject * list,
-                                  ObjectGadgetRamp ** result, int version);
+				      ObjectGadgetRamp ** result, int version);
 
 void ObjectGadgetRampFree(ObjectGadgetRamp * I);
 #endif

@@ -23,7 +23,6 @@ Z* -------------------------------------------------------------------
 #include"MemoryDebug.h"
 #include"Err.h"
 #include"Vector.h"
-#include"OOMac.h"
 #include"Setting.h"
 #include"Ortho.h"
 #include"Util.h"
@@ -40,6 +39,7 @@ Z* -------------------------------------------------------------------
 #include"PConv.h"
 #include"MyPNG.h"
 #include"CGO.h"
+#include "Feedback.h"
 
 #define SettingGetfv SettingGetGlobal_3fv
 
@@ -127,12 +127,9 @@ static void RayTransformInverseNormals33(unsigned int n, float3 * q, const float
 static
 void RayProjectTriangle(CRay * I, RayInfo * r, float *light, float *v0, float *n0,
                         float scale);
-void RaySetContext(CRay * I, int context)
+void RaySetContext(CRay * I, pymol::RenderContext context)
 {
-  if(context >= 0)
-    I->Context = context;
-  else
-    I->Context = 0;
+  I->context = context;
 }
 
 float RayGetScreenVertexScale(CRay * I, float *v1)
@@ -145,7 +142,7 @@ float RayGetScreenVertexScale(CRay * I, float *v1)
 
   if(I->Ortho) {
     ratio =
-      2 * (float) (fabs(I->Pos[2]) * tan((I->Fov / 2.0) * cPI / 180.0)) / (I->Height);
+      2 * (float) (fabs(I->Pos.z) * tan((I->Fov / 2.0) * cPI / 180.0)) / (I->Height);
   } else {
     float front_size =
       2 * I->Volume[4] * ((float) tan((I->Fov / 2.0F) * PI / 180.0F)) / (I->Height);
@@ -156,8 +153,8 @@ float RayGetScreenVertexScale(CRay * I, float *v1)
 
 static void RayApplyContextToVertex(CRay * I, float *v)
 {
-  switch (I->Context) {
-  case 1:
+  switch (I->context) {
+  case pymol::RenderContext::UnitWindow:
     {
       float tw;
       float th;
@@ -199,8 +196,8 @@ static void RayApplyContextToVertex(CRay * I, float *v)
 
 static void RayApplyContextToNormal(CRay * I, float *v)
 {
-  switch (I->Context) {
-  case 1:
+  switch (I->context) {
+  case pymol::RenderContext::UnitWindow:
     RayTransformInverseNormals33(1, (float3 *) v, I->ModelView, (float3 *) v);
     break;
   }
@@ -604,7 +601,7 @@ int RayExpandPrimitives(CRay * I)
   VLACacheSize(I->G, basis->Vert2Normal, int, nVert, 0, cCache_basis_vert2normal);
   VLACacheSize(I->G, basis->Normal, float, 3 * nNorm, 0, cCache_basis_normal);
 
-  VLACacheSize(I->G, I->Vert2Prim, int, nVert, 0, cCache_ray_vert2prim);
+  I->Vert2Prim.resize(nVert);
 
   voxel_floor = I->PixelRadius / 2.0F;
 
@@ -1281,8 +1278,8 @@ void RayRenderVRML2(CRay * I, int width, int height,
      wid[1]  = (I->max_box[1] - I->min_box[1]);
      wid[2]  = (I->max_box[2] - I->min_box[2]);
    */
-
-  copy3f(I->Pos, mid);
+  auto Pos = glm::value_ptr(I->Pos);
+  copy3f(Pos, mid);
   UtilConcatVLA(&vla, &cc, "#VRML V2.0 utf8\n"  /* WLD: most VRML2 readers req. utf8 */
                 "\n");
   if(!identity) {
@@ -2587,8 +2584,6 @@ void RayRenderPOV(CRay * I, int width, int height, char **headerVLA_ptr,
       fog_start = SettingGetGlobal_f(I->G, cSetting_fog_start);
     if(fog_start > 1.0F)
       fog_start = 1.0F;
-    if(fog_start < 0.0F)
-      fog_start = 0.0F;
   }
 
   /* SETUP */
@@ -2708,8 +2703,8 @@ void RayRenderPOV(CRay * I, int width, int height, char **headerVLA_ptr,
   }
 
   for(a = 0; a < I->NPrimitive; a++) {
-    char cap1 = cCylCapRound;
-    char cap2 = cCylCapRound;
+    auto cap1 = cCylCap::Round;
+    auto cap2 = cCylCap::Round;
     prim = I->Primitive + a;
     vert = base->Vertex + 3 * (prim->vert);
     if(prim->type == cPrimTriangle) {
@@ -2897,7 +2892,8 @@ static void RayHashSpawn(CRayHashThreadInfo * Thread, int n_thread, int n_total)
     info_list = PyList_New(n_thread);
     for(a = 0; a < n_thread; a++) {
       if((c + a) < n_total) {
-        PyList_SetItem(info_list, a, PyCObject_FromVoidPtr(Thread + c + a, NULL));
+        PyList_SetItem(
+            info_list, a, PyCapsule_New(Thread + c + a, nullptr, nullptr));
       } else {
         PyList_SetItem(info_list, a, PConvAutoNone(NULL));
       }
@@ -2926,7 +2922,7 @@ static void RayAntiSpawn(CRayAntiThreadInfo * Thread, int n_thread)
     " Ray: antialiasing with %d threads...\n", n_thread ENDFB(I->G);
   info_list = PyList_New(n_thread);
   for(a = 0; a < n_thread; a++) {
-    PyList_SetItem(info_list, a, PyCObject_FromVoidPtr(Thread + a, NULL));
+    PyList_SetItem(info_list, a, PyCapsule_New(Thread + a, nullptr, nullptr));
   }
   PXDecRef(PYOBJECT_CALLMETHOD
            (G->P_inst->cmd, "_ray_anti_spawn", "OO", info_list, G->P_inst->cmd));
@@ -2969,7 +2965,7 @@ static void RayTraceSpawn(CRayThreadInfo * Thread, int n_thread)
     " Ray: rendering with %d threads...\n", n_thread ENDFB(I->G);
   info_list = PyList_New(n_thread);
   for(a = 0; a < n_thread; a++) {
-    PyList_SetItem(info_list, a, PyCObject_FromVoidPtr(Thread + a, NULL));
+    PyList_SetItem(info_list, a, PyCapsule_New(Thread + a, nullptr, nullptr));
   }
   PXDecRef(PYOBJECT_CALLMETHOD
            (G->P_inst->cmd, "_ray_spawn", "OO", info_list, G->P_inst->cmd));
@@ -3407,9 +3403,7 @@ int RayTraceThread(CRayThreadInfo * T)
       fog_start = SettingGetGlobal_f(I->G, cSetting_fog_start);
     if(fog_start > 1.0F)
       fog_start = 1.0F;
-    if(fog_start < 0.0F)
-      fog_start = 0.0F;
-    if(fog_start > R_SMALL4) {
+    if(abs(fog_start) > R_SMALL4) {
       fogRangeFlag = true;
       if(fabs(fog_start - 1.0F) < R_SMALL4)     /* prevent div/0 */
         fogFlag = false;
@@ -3481,9 +3475,11 @@ int RayTraceThread(CRayThreadInfo * T)
 
   r1.base[2] = _0;
 
+  int* vert2prim_ptr = I->Vert2Prim.empty() ? nullptr : I->Vert2Prim.data();
+
   BasisCall[0].Basis = I->Basis + 1;
   BasisCall[0].rr = &r1;
-  BasisCall[0].vert2prim = I->Vert2Prim;
+  BasisCall[0].vert2prim = vert2prim_ptr;
   BasisCall[0].prim = I->Primitive;
   BasisCall[0].shadow = false;
   BasisCall[0].back = T->back;
@@ -3500,7 +3496,7 @@ int RayTraceThread(CRayThreadInfo * T)
     for(bc = 2; bc < n_basis; bc++) {
       BasisCall[bc].Basis = I->Basis + bc;
       BasisCall[bc].rr = &r2;
-      BasisCall[bc].vert2prim = I->Vert2Prim;
+      BasisCall[bc].vert2prim = vert2prim_ptr;
       BasisCall[bc].prim = I->Primitive;
       BasisCall[bc].shadow = true;
       BasisCall[bc].front = _0;
@@ -3810,10 +3806,13 @@ int RayTraceThread(CRayThreadInfo * T)
                   RayReflectAndTexture(I, &r1, perspective);
 
                 dotgle = -r1.dotgle;
-                if((interior_color < 0) && (interior_color > cColorExtCutoff)) {
-                  copy3f(r1.prim->ic, fc);
-                } else {
+                if (interior_color >= 0 || interior_color <= cColorExtCutoff) {
                   copy3f(inter, fc);
+                } else if (interior_color == cColorAtomic) {
+                  // Affects spheres+cylinders, but not surfaces+cartoon.
+                  copy3f(r1.prim->c1, fc);
+                } else {
+                  copy3f(r1.prim->ic, fc);
                 }
               } else {
                 if(!perspective)
@@ -3944,10 +3943,14 @@ int RayTraceThread(CRayThreadInfo * T)
                     }
 
                     dotgle = -r1.dotgle;
-                    if((interior_color < 0) && (interior_color > cColorExtCutoff)) {
-                      copy3f(r1.prim->ic, fc);
-                    } else {
+                    if (interior_color >= 0 ||
+                        interior_color <= cColorExtCutoff) {
                       copy3f(inter, fc);
+                    } else if (interior_color == cColorAtomic) {
+                      // Affects surfaces+cartoon, but not spheres+cylinders.
+                      copy3f(r1.prim->c1, fc);
+                    } else {
+                      copy3f(r1.prim->ic, fc);
                     }
                   }
                 }
@@ -5545,7 +5548,7 @@ void RayRender(CRay * I, unsigned int *image, double timing,
   float front = I->Volume[4];
   float back = I->Volume[5];
   float fov = I->Fov;
-  float *pos = I->Pos;
+  float *pos = glm::value_ptr(I->Pos);
   size_t width = I->Width;
   size_t height = I->Height;
   int ray_trace_mode;
@@ -5875,9 +5878,10 @@ void RayRender(CRay * I, unsigned int *image, double timing,
       CRayHashThreadInfo *thread_info = pymol::calloc<CRayHashThreadInfo>(I->NBasis);
 
       /* rendering map */
+      int* vert2prim_ptr = I->Vert2Prim.empty() ? nullptr : I->Vert2Prim.data();
 
       thread_info[0].basis = I->Basis + 1;
-      thread_info[0].vert2prim = I->Vert2Prim;
+      thread_info[0].vert2prim = vert2prim_ptr;
       thread_info[0].prim = I->Primitive;
       thread_info[0].n_prim = I->NPrimitive;
       thread_info[0].clipBox = I->Volume;
@@ -5908,8 +5912,9 @@ void RayRender(CRay * I, unsigned int *image, double timing,
         int bc;
         float factor = SettingGetGlobal_f(I->G, cSetting_ray_hint_shadow);
         for(bc = 2; bc < I->NBasis; bc++) {
+          int* vert2prim_ptr = I->Vert2Prim.empty() ? nullptr : I->Vert2Prim.data();
           thread_info[bc - 1].basis = I->Basis + bc;
-          thread_info[bc - 1].vert2prim = I->Vert2Prim;
+          thread_info[bc - 1].vert2prim = vert2prim_ptr;
           thread_info[bc - 1].prim = I->Primitive;
           thread_info[bc - 1].n_prim = I->NPrimitive;
           thread_info[bc - 1].clipBox = NULL;
@@ -5932,13 +5937,14 @@ void RayRender(CRay * I, unsigned int *image, double timing,
 #ifdef _PYMOL_NOPY
       n_thread = 1;          /* serial execution */
 #endif
-      ok &= BasisMakeMap(I->Basis + 1, I->Vert2Prim, I->Primitive, I->NPrimitive,
+      int* vert2prim_ptr = I->Vert2Prim.empty() ? nullptr : I->Vert2Prim.data();
+      ok &= BasisMakeMap(I->Basis + 1, vert2prim_ptr, I->Primitive, I->NPrimitive,
 			 I->Volume, 0, cCache_ray_map, perspective, front, I->PrimSize);
       if(ok && shadows) {
         int bc;
         float factor = SettingGetGlobal_f(I->G, cSetting_ray_hint_shadow);
         for(bc = 2; ok && bc < I->NBasis; bc++) {
-          ok &= BasisMakeMap(I->Basis + bc, I->Vert2Prim, I->Primitive, I->NPrimitive,
+          ok &= BasisMakeMap(I->Basis + bc, vert2prim_ptr, I->Primitive, I->NPrimitive,
 			     NULL, bc - 1, cCache_ray_map, false, _0, I->PrimSize * factor);
         }
       }
@@ -6212,9 +6218,7 @@ void RayRender(CRay * I, unsigned int *image, double timing,
             fog_start = SettingGetGlobal_f(I->G, cSetting_fog_start);
           if(fog_start > 1.0F)
             fog_start = 1.0F;
-          if(fog_start < 0.0F)
-            fog_start = 0.0F;
-          if(fog_start > R_SMALL4) {
+          if(fabs(fog_start) > R_SMALL4) {
             fogRangeFlag = true;
             if(fabs(fog_start - 1.0F) < R_SMALL4)       /* prevent div/0 */
               fogFlag = false;
@@ -6687,13 +6691,11 @@ int CRay::sphere3fv(const float *v, float r)
   (*vv++) = (*v++);
 
   if(I->TTTFlag) {
-    p->r1 *= length3f(I->TTT);
-    transformTTT44f3f(I->TTT, p->v1, p->v1);
+    p->r1 *= length3f(glm::value_ptr(I->TTT));
+    transformTTT44f3f(glm::value_ptr(I->TTT), p->v1, p->v1);
   }
 
-  if(I->Context) {
-    RayApplyContextToVertex(I, p->v1);
-  }
+  RayApplyContextToVertex(I, p->v1);
 
   I->NPrimitive++;
   return true;
@@ -6710,15 +6712,15 @@ void RayGetScaledAxes(CRay * I, float *xn, float *yn)
   v = TextGetPos(I->G);
 
   if(I->TTTFlag) {
-    transformTTT44f3f(I->TTT, v, vt);
+    transformTTT44f3f(glm::value_ptr(I->TTT), v, vt);
   } else {
     copy3f(v, vt);
   }
 
   v_scale = RayGetScreenVertexScale(I, vt) / I->Sampling;
 
-  RayApplyMatrixInverse33(1, (float3 *) xn0, I->Rotation, (float3 *) xn0);
-  RayApplyMatrixInverse33(1, (float3 *) yn0, I->Rotation, (float3 *) yn0);
+  RayApplyMatrixInverse33(1, (float3 *) xn0, glm::value_ptr(I->Rotation), (float3 *) xn0);
+  RayApplyMatrixInverse33(1, (float3 *) yn0, glm::value_ptr(I->Rotation), (float3 *) yn0);
 
   scale3f(xn0, v_scale, xn);
   scale3f(yn0, v_scale, yn);
@@ -6760,15 +6762,13 @@ int CRay::character(int char_id)
   (*vv++) = v[2];
 
   if(I->TTTFlag) {
-    transformTTT44f3f(I->TTT, p->v1, p->v1);
+    transformTTT44f3f(glm::value_ptr(I->TTT), p->v1, p->v1);
   }
   /* what's the width of 1 screen window pixel at this point in space? */
 
   v_scale = RayGetScreenVertexScale(I, p->v1) / I->Sampling;
 
-  if(I->Context) {
-    RayApplyContextToVertex(I, p->v1);
-  }
+  RayApplyContextToVertex(I, p->v1);
 
   {
     float xn[3] = { 1.0F, 0.0F, 0.0F };
@@ -6780,9 +6780,9 @@ int CRay::character(int char_id)
     int width_i, height_i;
     CPrimitive *pp = p + 1;
 
-    RayApplyMatrixInverse33(1, (float3 *) xn, I->Rotation, (float3 *) xn);
-    RayApplyMatrixInverse33(1, (float3 *) yn, I->Rotation, (float3 *) yn);
-    RayApplyMatrixInverse33(1, (float3 *) zn, I->Rotation, (float3 *) zn);
+    RayApplyMatrixInverse33(1, (float3 *) xn, glm::value_ptr(I->Rotation), (float3 *) xn);
+    RayApplyMatrixInverse33(1, (float3 *) yn, glm::value_ptr(I->Rotation), (float3 *) yn);
+    RayApplyMatrixInverse33(1, (float3 *) zn, glm::value_ptr(I->Rotation), (float3 *) zn);
 
     CharacterGetGeometry(I->G, char_id, &width_i, &height_i, &xorig, &yorig, &advance);
     width = (float) width_i;
@@ -6910,15 +6910,13 @@ int CRay::cylinder3fv(const float *v1, const float *v2, float r, const float *c1
   I->PrimSizeCnt++;
 
   if(I->TTTFlag) {
-    p->r1 *= length3f(I->TTT);
-    transformTTT44f3f(I->TTT, p->v1, p->v1);
-    transformTTT44f3f(I->TTT, p->v2, p->v2);
+    p->r1 *= length3f(glm::value_ptr(I->TTT));
+    transformTTT44f3f(glm::value_ptr(I->TTT), p->v1, p->v1);
+    transformTTT44f3f(glm::value_ptr(I->TTT), p->v2, p->v2);
   }
 
-  if(I->Context) {
-    RayApplyContextToVertex(I, p->v1);
-    RayApplyContextToVertex(I, p->v2);
-  }
+  RayApplyContextToVertex(I, p->v1);
+  RayApplyContextToVertex(I, p->v2);
 
   vv = p->c1;
   (*vv++) = (*c1++);
@@ -6948,29 +6946,31 @@ int CRay::cylinder3fv(const float *v1, const float *v2, float r, const float *c1
 /*========================================================================*/
 int CRay::customCylinder3fv(const cgo::draw::custom_cylinder& cyl, const float alpha1, const float alpha2){
   return customCylinder3fv(cyl.vertex1, cyl.vertex2, cyl.radius, cyl.color1,
-                        cyl.color2, cyl.cap1, cyl.cap2, alpha1, alpha2);
+                        cyl.color2, cyl.get_cap1(), cyl.get_cap2(), alpha1, alpha2);
 }
 
 int CRay::customCylinder3fv(const cgo::draw::custom_cylinder& cyl){
   return customCylinder3fv(cyl.vertex1, cyl.vertex2, cyl.radius, cyl.color1,
-                        cyl.color2, cyl.cap1, cyl.cap2, 1.f - Trans, 1.f - Trans);
+                        cyl.color2, cyl.get_cap1(), cyl.get_cap2(), 1.f - Trans, 1.f - Trans);
 }
 
 int CRay::customCylinderAlpha3fv(const cgo::draw::custom_cylinder_alpha& cyl){
   return customCylinder3fv(cyl.vertex1, cyl.vertex2, cyl.radius, cyl.color1,
-                        cyl.color2, cyl.cap1, cyl.cap2, cyl.color1[3], cyl.color2[3]);
+                        cyl.color2, cyl.get_cap1(), cyl.get_cap2(), cyl.color1[3], cyl.color2[3]);
 }
 
 int CRay::customCylinder3fv(const float* v1, const float* v2, float r,
-    const float* c1, const float* c2, const int cap1, const int cap2)
+    const float* c1, const float* c2, const cCylCap cap1, const cCylCap cap2)
 {
   return customCylinder3fv(
       v1, v2, r, c1, c2, cap1, cap2, 1.f - Trans, 1.f - Trans);
 }
 
 int CRay::customCylinder3fv(const float *v1, const float *v2, float r,
-                            const float *c1, const float *c2, const int cap1,
-                            const int cap2, const float alpha1, const float alpha2)
+                            const float *c1, const float *c2,
+                            const cCylCap cap1,
+                            const cCylCap cap2,
+                            const float alpha1, const float alpha2)
 {
   CRay * I = this;
   CPrimitive *p;
@@ -7006,15 +7006,13 @@ int CRay::customCylinder3fv(const float *v1, const float *v2, float r,
   I->PrimSizeCnt++;
 
   if(I->TTTFlag) {
-    p->r1 *= length3f(I->TTT);
-    transformTTT44f3f(I->TTT, p->v1, p->v1);
-    transformTTT44f3f(I->TTT, p->v2, p->v2);
+    p->r1 *= length3f(glm::value_ptr(I->TTT));
+    transformTTT44f3f(glm::value_ptr(I->TTT), p->v1, p->v1);
+    transformTTT44f3f(glm::value_ptr(I->TTT), p->v2, p->v2);
   }
 
-  if(I->Context) {
-    RayApplyContextToVertex(I, p->v1);
-    RayApplyContextToVertex(I, p->v2);
-  }
+  RayApplyContextToVertex(I, p->v1);
+  RayApplyContextToVertex(I, p->v2);
 
   vv = p->c1;
   (*vv++) = (*c1++);
@@ -7043,7 +7041,7 @@ int CRay::customCylinder3fv(const float *v1, const float *v2, float r,
 }
 
 int CRay::cone3fv(const float *v1, const float *v2, float r1, float r2,
-	       const float *c1, const float *c2, int cap1, int cap2)
+	       const float *c1, const float *c2, cCylCap cap1, cCylCap cap2)
 {
   CRay * I = this;
   CPrimitive *p;
@@ -7052,21 +7050,10 @@ int CRay::cone3fv(const float *v1, const float *v2, float r1, float r2,
   int ok = true;
 
   if(r2 > r1) {                 /* make sure r1 is always larger */
-    float t;
-    const float *tp;
-    int ti;
-    t = r2;
-    r2 = r1;
-    r1 = t;
-    tp = c2;
-    c2 = c1;
-    c1 = tp;
-    tp = v2;
-    v2 = v1;
-    v1 = tp;
-    ti = cap2;
-    cap2 = cap1;
-    cap1 = ti;
+    std::swap(r1, r2);
+    std::swap(c1, c2);
+    std::swap(v1, v2);
+    std::swap(cap1, cap2);
   }
 
   VLACacheCheck(I->G, I->Primitive, CPrimitive, I->NPrimitive, 0, cCache_ray_primitive);
@@ -7106,14 +7093,12 @@ int CRay::cone3fv(const float *v1, const float *v2, float r1, float r2,
   I->PrimSizeCnt++;
 
   if(I->TTTFlag) {
-    transformTTT44f3f(I->TTT, p->v1, p->v1);
-    transformTTT44f3f(I->TTT, p->v2, p->v2);
+    transformTTT44f3f(glm::value_ptr(I->TTT), p->v1, p->v1);
+    transformTTT44f3f(glm::value_ptr(I->TTT), p->v2, p->v2);
   }
 
-  if(I->Context) {
-    RayApplyContextToVertex(I, p->v1);
-    RayApplyContextToVertex(I, p->v2);
-  }
+  RayApplyContextToVertex(I, p->v1);
+  RayApplyContextToVertex(I, p->v2);
 
   vv = p->c1;
   (*vv++) = (*c1++);
@@ -7174,15 +7159,13 @@ int CRay::sausage3fv(const float *v1, const float *v2, float r, const float *c1,
   I->PrimSizeCnt++;
 
   if(I->TTTFlag) {
-    p->r1 *= length3f(I->TTT);
-    transformTTT44f3f(I->TTT, p->v1, p->v1);
-    transformTTT44f3f(I->TTT, p->v2, p->v2);
+    p->r1 *= length3f(glm::value_ptr(I->TTT));
+    transformTTT44f3f(glm::value_ptr(I->TTT), p->v1, p->v1);
+    transformTTT44f3f(glm::value_ptr(I->TTT), p->v2, p->v2);
   }
 
-  if(I->Context) {
-    RayApplyContextToVertex(I, p->v1);
-    RayApplyContextToVertex(I, p->v2);
-  }
+  RayApplyContextToVertex(I, p->v1);
+  RayApplyContextToVertex(I, p->v2);
 
   vv = p->c1;
   (*vv++) = (*c1++);
@@ -7294,19 +7277,17 @@ int CRay::ellipsoid3fv(const float *v, float r, const float *n1, const float *n2
   (*vv++) = (*v++);
 
   if(I->TTTFlag) {
-    p->r1 *= length3f(I->TTT);
-    transformTTT44f3f(I->TTT, p->v1, p->v1);
-    transform_normalTTT44f3f(I->TTT, p->n1, p->n1);
-    transform_normalTTT44f3f(I->TTT, p->n2, p->n2);
-    transform_normalTTT44f3f(I->TTT, p->n3, p->n3);
+    p->r1 *= length3f(glm::value_ptr(I->TTT));
+    transformTTT44f3f(glm::value_ptr(I->TTT), p->v1, p->v1);
+    transform_normalTTT44f3f(glm::value_ptr(I->TTT), p->n1, p->n1);
+    transform_normalTTT44f3f(glm::value_ptr(I->TTT), p->n2, p->n2);
+    transform_normalTTT44f3f(glm::value_ptr(I->TTT), p->n3, p->n3);
   }
 
-  if(I->Context) {
-    RayApplyContextToVertex(I, p->v1);
-    RayApplyContextToNormal(I, p->n1);
-    RayApplyContextToNormal(I, p->n2);
-    RayApplyContextToNormal(I, p->n3);
-  }
+  RayApplyContextToVertex(I, p->v1);
+  RayApplyContextToNormal(I, p->n1);
+  RayApplyContextToNormal(I, p->n2);
+  RayApplyContextToNormal(I, p->n3);
 
   I->NPrimitive++;
   return true;
@@ -7473,24 +7454,22 @@ int CRay::triangle3fv(
   }
 
   if(I->TTTFlag) {
-    transformTTT44f3f(I->TTT, p->v1, p->v1);
-    transformTTT44f3f(I->TTT, p->v2, p->v2);
-    transformTTT44f3f(I->TTT, p->v3, p->v3);
-    transform_normalTTT44f3f(I->TTT, p->n0, p->n0);
-    transform_normalTTT44f3f(I->TTT, p->n1, p->n1);
-    transform_normalTTT44f3f(I->TTT, p->n2, p->n2);
-    transform_normalTTT44f3f(I->TTT, p->n3, p->n3);
+    transformTTT44f3f(glm::value_ptr(I->TTT), p->v1, p->v1);
+    transformTTT44f3f(glm::value_ptr(I->TTT), p->v2, p->v2);
+    transformTTT44f3f(glm::value_ptr(I->TTT), p->v3, p->v3);
+    transform_normalTTT44f3f(glm::value_ptr(I->TTT), p->n0, p->n0);
+    transform_normalTTT44f3f(glm::value_ptr(I->TTT), p->n1, p->n1);
+    transform_normalTTT44f3f(glm::value_ptr(I->TTT), p->n2, p->n2);
+    transform_normalTTT44f3f(glm::value_ptr(I->TTT), p->n3, p->n3);
   }
 
-  if(I->Context) {
-    RayApplyContextToVertex(I, p->v1);
-    RayApplyContextToVertex(I, p->v2);
-    RayApplyContextToVertex(I, p->v3);
-    RayApplyContextToNormal(I, p->n0);
-    RayApplyContextToNormal(I, p->n1);
-    RayApplyContextToNormal(I, p->n2);
-    RayApplyContextToNormal(I, p->n3);
-  }
+  RayApplyContextToVertex(I, p->v1);
+  RayApplyContextToVertex(I, p->v2);
+  RayApplyContextToVertex(I, p->v3);
+  RayApplyContextToNormal(I, p->n0);
+  RayApplyContextToNormal(I, p->n1);
+  RayApplyContextToNormal(I, p->n2);
+  RayApplyContextToNormal(I, p->n3);
 
   I->NPrimitive++;
   return true;
@@ -7524,7 +7503,7 @@ CRay *RayNew(PyMOLGlobals * G, int antialias)
   unsigned char *testPtr;
   int a;
 
-  OOCalloc(I->G, CRay);
+  auto I = new CRay();
   I->G = G;
   test = 0xFF000000;
   testPtr = (unsigned char *) &test;
@@ -7539,12 +7518,9 @@ CRay *RayNew(PyMOLGlobals * G, int antialias)
   I->Basis = CacheAlloc(I->G, CBasis, 12, 0, cCache_ray_basis);
   BasisInit(I->G, I->Basis, 0);
   BasisInit(I->G, I->Basis + 1, 1);
-  I->Vert2Prim = VLACacheAlloc(I->G, int, 1, 0, cCache_ray_vert2prim);
   I->NBasis = 2;
   I->Primitive = NULL;
   I->NPrimitive = 0;
-  I->TTTStackVLA = NULL;
-  I->TTTStackDepth = 0;
   I->CheckInterior = false;
   if(antialias < 0)
     antialias = SettingGetGlobal_i(I->G, cSetting_antialias);
@@ -7579,8 +7555,8 @@ CRay *RayNew(PyMOLGlobals * G, int antialias)
 
 void RayPrepare(CRay * I, float v0, float v1, float v2,
                 float v3, float v4, float v5,
-                float fov, float *pos,
-                float *mat, float *rotMat, float aspRat,
+                float fov, glm::vec3 pos,
+                float *mat, const glm::mat4& rotMat, float aspRat,
                 int width, int height, float pixel_scale, int ortho,
                 float pixel_ratio, float front_back_ratio, float magnified)
 
@@ -7589,8 +7565,6 @@ void RayPrepare(CRay * I, float v0, float v1, float v2,
   int a;
   if(!I->Primitive)
     I->Primitive = VLACacheAlloc(I->G, CPrimitive, 10000, 3, cCache_ray_primitive);
-  if(!I->Vert2Prim)
-    I->Vert2Prim = VLACacheAlloc(I->G, int, 10000, 3, cCache_ray_vert2prim);
   I->Volume[0] = v0;
   I->Volume[1] = v1;
   I->Volume[2] = v2;
@@ -7627,9 +7601,7 @@ void RayPrepare(CRay * I, float v0, float v1, float v2,
     I->ProMatrix[14] = (-2.f * I->Volume[5] * I->Volume[4])/I->Range[2];
     I->ProMatrix[15] = 0.f;
   }
-  if(rotMat)
-    for(a = 0; a < 16; a++)
-      I->Rotation[a] = rotMat[a];
+  I->Rotation = rotMat;
   I->Ortho = ortho;
   if(ortho) {
     I->PixelRadius = (((float) I->Range[0]) / width) * pixel_scale;
@@ -7642,8 +7614,7 @@ void RayPrepare(CRay * I, float v0, float v1, float v2,
   I->PrimSizeCnt = 0;
   I->PrimSize = 0.0;
   I->Fov = fov;
-  copy3f(pos, I->Pos);
-
+  I->Pos = pos;
 
 /* BEGIN PROPRIETARY CODE SEGMENT (see disclaimer in "os_proprietary.h") */
 #ifdef PYMOL_EVAL
@@ -7660,8 +7631,8 @@ void RayPrepare(CRay * I, float v0, float v1, float v2,
 void RaySetTTT(CRay * I, int flag, float *ttt)
 {
   I->TTTFlag = flag;
-  if(flag) {
-    UtilCopyMem(I->TTT, ttt, sizeof(float) * 16);
+  if(I->TTTFlag) {
+    I->TTT = glm::make_mat4(ttt);
   }
 }
 
@@ -7670,7 +7641,7 @@ void RayGetTTT(CRay * I, float *ttt)
   if(!I->TTTFlag) {
     identity44f(ttt);
   } else {
-    copy44f(I->TTT, ttt);
+    ttt = glm::value_ptr(I->TTT);
   }
 }
 
@@ -7685,7 +7656,6 @@ void RayRelease(CRay * I)
   }
   I->NBasis = 0;
   VLACacheFreeP(I->G, I->Primitive, 0, cCache_ray_primitive, false);
-  VLACacheFreeP(I->G, I->Vert2Prim, 0, cCache_ray_vert2prim, false);
 }
 
 
@@ -7695,9 +7665,7 @@ void RayFree(CRay * I)
   RayRelease(I);
   CharacterSetRetention(I->G, false);
   CacheFreeP(I->G, I->Basis, 0, cCache_ray_basis, false);
-  VLACacheFreeP(I->G, I->Vert2Prim, 0, cCache_ray_vert2prim, false);
-  VLAFreeP(I->TTTStackVLA);
-  OOFreeP(I);
+  DeleteP(I);
 }
 
 
@@ -7705,30 +7673,18 @@ void RayFree(CRay * I)
 void RayPushTTT(CRay * I)
 {
   if(I->TTTFlag) {
-    if(!I->TTTStackVLA) {
-      I->TTTStackVLA = VLAlloc(float, 16);
-      copy44f(I->TTT, I->TTTStackVLA);
-      I->TTTStackDepth = 1;
-    } else {
-      float *p;
-      VLACheck(I->TTTStackVLA, float, I->TTTStackDepth * 16 + 15);
-      p = I->TTTStackVLA + 16 * I->TTTStackDepth;
-      copy44f(I->TTT, p);
-      I->TTTStackDepth++;
-    }
+    I->TTTStack.push_back(I->TTT);
   }
 }
 
 void RayPopTTT(CRay * I)
 {
-  if(I->TTTStackDepth > 0) {
-    float *p;
-    I->TTTStackDepth--;
-    p = I->TTTStackVLA + 16 * I->TTTStackDepth;
-    copy44f(p, I->TTT);
-    I->TTTFlag = true;
-  } else {
+  if(I->TTTStack.empty()){
     I->TTTFlag = false;
+  } else {
+    I->TTT = I->TTTStack.back();
+    I->TTTStack.pop_back();
+    I->TTTFlag = true;
   }
 }
 
@@ -7876,9 +7832,9 @@ float RayGetScaledAllAxesAtPoint(CRay * I, float *pt, float *xn, float *yn, floa
 
   v_scale = RayGetScreenVertexScale(I, pt) / I->Sampling;
 
-  RayApplyMatrixInverse33(1, (float3 *) xn0, I->Rotation, (float3 *) xn0);
-  RayApplyMatrixInverse33(1, (float3 *) yn0, I->Rotation, (float3 *) yn0);
-  RayApplyMatrixInverse33(1, (float3 *) zn0, I->Rotation, (float3 *) zn0);
+  RayApplyMatrixInverse33(1, (float3 *) xn0, glm::value_ptr(I->Rotation), (float3 *) xn0);
+  RayApplyMatrixInverse33(1, (float3 *) yn0, glm::value_ptr(I->Rotation), (float3 *) yn0);
+  RayApplyMatrixInverse33(1, (float3 *) zn0, glm::value_ptr(I->Rotation), (float3 *) zn0);
 
   scale3f(xn0, v_scale, xn);
   scale3f(yn0, v_scale, yn);

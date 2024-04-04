@@ -12,7 +12,7 @@
 #-*
 #Z* -------------------------------------------------------------------
 
-from __future__ import print_function, absolute_import
+from .constants import CURRENT_STATE, ALL_STATES
 
 if True:
 
@@ -557,6 +557,10 @@ SEE ALSO
 '''
         # preprocess selection
         selection = selector.process(selection)
+        if selection and selection not in ('center', 'origin'):
+            # force molecular selection, otherwise "all" or name patterns can
+            # expand to non-molecular objects (like the map itself).
+            selection = "(" + selection + ")"
         #
         if carve is None:
             carve=0.0
@@ -588,6 +592,8 @@ ARGUMENTS
 
     selection = an atom selection about which to display the mesh with
         an additional "buffer" (if provided).
+
+    state = specifies which state to create.
 
     carve = a radius about each atom in the selection for which to
         include density. If "carve" is not provided, then the whole
@@ -631,7 +637,7 @@ SEE ALSO
                             int(source_state)-1,int(quiet))
 
         if ramp:
-            _self.volume_color(name, ramp)
+            _self.volume_color(name, ramp, state)
 
         return r
 
@@ -717,7 +723,7 @@ DESCRIPTION
 
 USAGE
 
-    isosurface name, map, level [, selection [, buffer [, state [, carve ]]]]
+    isosurface name, map, [, level [, selection [, buffer [, state [, carve [, source_state [, side [, mode ]]]]]]]]
 
 ARGUMENTS
 
@@ -725,17 +731,26 @@ ARGUMENTS
 
     map = the name of the map object to use for computing the mesh.
 
-    level = the contour level.
+    level = the contour level. (default=1.0)
 
     selection = an atom selection about which to display the mesh with
-        an additional "buffer" (if provided).
+        an additional "buffer" (if provided). (default='')
+
+    buffer = buffer around selection to display mesh (default=0.0)
 
     state = the state into which the object should be loaded (default=1)
         (set state=0 to append new surface as a new state)
 
     carve = a radius about each atom in the selection for which to
         include density. If "carve= not provided, then the whole
-        brick is displayed.
+        brick is displayed. (default=None)
+
+    source_state = the state of the map from which the object should be loaded. (default=0)
+
+    side = Front or back face. Triangle-winding/normal direction. (default=1)
+
+    mode = surface geometry (0: dots; 1: lines; 2: triangle triangle-normals;
+        3: triangle gradient-normals) (default=3)
 
 NOTES
 
@@ -1019,7 +1034,7 @@ SEE ALSO
                 name = _self.get_unused_name("obj")
             r = _cmd.create(_self._COb,str(name),"("+str(selection)+")",
                             int(source_state)-1,int(target_state)-1,
-                            int(discrete),int(zoom),int(quiet),int(singletons))
+                            int(discrete),int(zoom),int(quiet),int(singletons), int(copy_properties))
         finally:
             _self.unlock(r,_self)
 
@@ -1031,7 +1046,7 @@ SEE ALSO
         if _self._raising(r,_self): raise pymol.CmdException
         return r
 
-    def extract(*arg,**kw):
+    def extract(name, selection, *arg, _self=cmd, **kw):
         '''
 DESCRIPTION
 
@@ -1050,7 +1065,7 @@ SEE ALSO
     '''
 
         kw['extract'] = 1
-        return create(*arg, **kw)
+        return _self.create(name, selection, *arg, **kw)
 
     pseudoatom_mode_dict = {
         "unit" : 0, # radius 0.5
@@ -1064,20 +1079,17 @@ SEE ALSO
     unquote_re = re.compile(r"r?('.*'|\".*\")$")
 
     def unquote(s):
-        if sys.version_info[0] > 2 and isinstance(s, bytes):
+        if isinstance(s, bytes):
             s = s.decode('utf-8', 'replace')
 
         s = str(s)
         if unquote_re.match(s):
-            try:
-                return cmd.safe_eval(s)
-            except SyntaxError:
-                print(" Warning: unquote failed for", repr(s))
+            s = s.strip('\"')
         return s
 
     def pseudoatom(object='', selection='', name='PS1', resn='PSD', resi='1', chain='P',
                    segi='PSDO', elem='PS', vdw=-1.0, hetatm=1, b=0.0, q=0.0, color='',
-                   label='', pos=None, state=0, mode='rms', quiet=1,_self=cmd):
+                   label='', pos=None, state=ALL_STATES, mode='rms', quiet=1,_self=cmd):
         '''
         
 DESCRIPTION
@@ -1193,3 +1205,20 @@ EXAMPLE
 
         if int(zoom):
             _self.zoom(name, state=0)
+
+    def curve_new(name="", curve_type="bezier", *, _self=cmd):
+        """
+DESCRIPTION
+
+    "curve_new" creates a new curve object.
+
+ARGUMENTS
+
+    name = string: name of object to create
+
+    curve_type = string: type of curve (currently only "bezier" supported)
+        """
+        if not name:
+            name = _self.get_unused_name("Curve")
+        with _self.lockcm:
+            _cmd.curve_new(_self._COb, name, curve_type)

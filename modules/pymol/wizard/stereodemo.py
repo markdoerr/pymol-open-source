@@ -27,21 +27,16 @@ class Stereodemo(Wizard):
             self.last = None
         saved['last']=self.last
 
-    def __init__(self,*arg,**kw):
-        _self=kw.get('_self',cmd)
+    def __init__(self, name="cartoon", mono=None, _self=cmd):
         Wizard.__init__(self,_self)
         self.message = []
         self.last = None
         cmd.full_screen("off")
-        if not  ("mono" in list(kw.keys())):
+        if not mono:
             cmd.stereo("on")
-        cmd.set("sphere_mode","5")
         if 'last' in saved:
             self.last = saved['last']
-        if len(arg):
-            self.launch(arg[0])
-        else:
-            self.launch("cartoon")
+        self.launch(name)
 
     def get_prompt(self):
         saved['last']=self.last
@@ -154,7 +149,6 @@ class DemoInfo:
             cmd.rock(1)
             cmd.set("sweep_mode",3)
             cmd.set("sweep_angle",10)
-            cmd.set("sphere_mode",5)
             cmd.do("replace_wizard toggle, Molecular Animation")
         else:
             cmd.set("mesh_width",1)
@@ -388,7 +382,6 @@ class DemoInfo:
             cmd.set("suspend_updates",1,quiet=1)
             cmd.disable()
             cmd.delete("ray")
-            cmd.set("sphere_mode",5)
             cmd.set("sphere_scale",1.0)
             cmd.load("$PYMOL_DATA/demo/il2.pdb","ray")
             cmd.remove("(ray and hydro)")
@@ -414,7 +407,6 @@ class DemoInfo:
             cmd.disable()
             cmd.delete("sculpt")
             cmd.set("sphere_scale","1.0")
-            cmd.set("sphere_mode",5)
             cmd.load("$PYMOL_DATA/demo/pept.pdb","sculpt")
             cmd.hide("lines","sculpt")
 #            cmd.show("sticks","sculpt")

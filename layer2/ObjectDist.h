@@ -17,26 +17,26 @@ Z* -------------------------------------------------------------------
 #ifndef _H_ObjectDist
 #define _H_ObjectDist
 
-#include"PyMOLObject.h"
-#include"AtomInfo.h"
-#include"Vector.h"
-#include"Color.h"
+#include "PyMOLObject.h"
+#include <vector>
+
+struct DistSet;
 
 /* NOTE: "Dist" names & symbols should be updated to "Measurement" */
 
-struct ObjectDist : public CObject {
-  /* Array of pointers to DistSets */
-  struct DistSet **DSet = nullptr;
-  /* number of dist sets */
-  int NDSet = 0;
+struct ObjectDist : public pymol::CObject {
+    std::vector<pymol::copyable_ptr<DistSet>> DSet;
+
   ObjectDist(PyMOLGlobals* G);
-  ~ObjectDist();
+  ObjectDist(const ObjectDist& other);
+  ObjectDist& operator=(const ObjectDist& other);
 
   // virtual methods
   void update() override;
   void render(RenderInfo* info) override;
-  void invalidate(int rep, int level, int state) override;
+  void invalidate(cRep_t rep, cRepInv_t level, int state) override;
   int getNFrame() const override;
+  pymol::CObject* clone() const override;
 };
 
 ObjectDist *ObjectDistNewFromSele(PyMOLGlobals * G, ObjectDist * oldObj,
@@ -58,7 +58,7 @@ int ObjectDistGetLabelTxfVertex(ObjectDist * I, int state, int index, float *v);
 int ObjectDistMoveLabel(ObjectDist * I, int state, int index, float *v, int mode,
                         int log);
 
-void ObjectDistInvalidateRep(ObjectDist * I, int rep);
+void ObjectDistInvalidateRep(ObjectDist * I, cRep_t rep);
 PyObject *ObjectDistAsPyList(ObjectDist * I);
 int ObjectDistNewFromPyList(PyMOLGlobals * G, PyObject * list, ObjectDist ** result);
 

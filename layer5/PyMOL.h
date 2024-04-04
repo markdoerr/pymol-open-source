@@ -111,12 +111,10 @@ typedef struct _CPyMOLOptions CPyMOLOptions;
 CPyMOLOptions *PyMOLOptions_New(void);
 void PyMOLOptions_Free(CPyMOLOptions * option);
 
-CPyMOLOptions *PyMOLOptions_NewWithPython(int argc, char *argv[]);
-
 /* PyMOL instance type */
 
 #ifndef CPyMOL_DEFINED
-typedef struct _CPyMOL CPyMOL;
+struct CPyMOL;
 #define CPyMOL_DEFINED
 #endif
 
@@ -156,6 +154,8 @@ typedef struct _CPyMOL CPyMOL;
 #define ATOM_PROP_SETTINGS 33
 #define ATOM_PROP_PROPERTIES 34
 #define ATOM_PROP_ONELETTER 40
+#define ATOM_PROP_EXPLICIT_DEGREE 41
+#define ATOM_PROP_EXPLICIT_VALENCE 42
 
 /* return status values */
 
@@ -245,7 +245,7 @@ void PyMOL_NeedFakeDrag(CPyMOL * I);
 void PyMOL_NeedRedisplay(CPyMOL * I);
 void PyMOL_NeedSwap(CPyMOL * I);
 void PyMOL_SetClickReady(CPyMOL * I, const char *name, int index, int button, int mod, int x,
-                         int y, const float *pos, int state);
+                         int y, const float *pos, int state, int bond = -1);
 void PyMOL_SetPassive(CPyMOL * I, int onOff);
 void PyMOL_NeedReshape(CPyMOL * I, int mode, int x, int y, int width, int height);
 
@@ -336,8 +336,8 @@ void PyMOL_SetModalDraw(CPyMOL * I, PyMOLModalDrawFn * fn);     /* for internal 
 
 /* developer/transient privates */
 
-struct _PyMOLGlobals *PyMOL_GetGlobals(CPyMOL * I);
-struct _PyMOLGlobals **PyMOL_GetGlobalsHandle(CPyMOL * I);
+struct PyMOLGlobals* PyMOL_GetGlobals(CPyMOL * I);
+struct PyMOLGlobals** PyMOL_GetGlobalsHandle(CPyMOL * I);
 
 void PyMOL_RunTest(CPyMOL * I, int group, int test);
 

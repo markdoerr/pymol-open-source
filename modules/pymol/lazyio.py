@@ -4,9 +4,6 @@ Support for some less common file formats for PyMOL.
 Copyright (c) Schrodinger, LLC.
 '''
 
-from __future__ import print_function as _
-from __future__ import absolute_import as _
-
 import os
 
 import pymol
@@ -242,6 +239,16 @@ DESCRIPTION
     '''
     raise pymol.IncentiveOnlyException(
             "STL import not supported by this PyMOL build")
+
+
+def read_collada(contents: bytes, oname, state=0, zoom=-1, *, _self=cmd):
+    '''
+DESCRIPTION
+
+    Load COLLADA content as a CGO object
+    '''
+    raise pymol.IncentiveOnlyException(
+            "COLLADA import not supported by this PyMOL build")
 
 
 def get_mmtfstr(selection='all', state=1, _self=cmd):

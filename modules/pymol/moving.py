@@ -15,10 +15,7 @@
 if True:
 
     import sys
-    if sys.version_info[0] == 2:
-        import thread
-    else:
-        import _thread as thread
+    import _thread as thread
 
     from . import selector
     import pymol
@@ -423,17 +420,17 @@ SEE ALSO
     png, save
     
         '''
-        r = DEFAULT_ERROR
-        args = (prefix, int(first) - 1, int(last) - 1,
+        MODE_DEFAULT = -1
+        MODE_RAY = 2
+        mode = int(mode)
+        assert mode in (MODE_DEFAULT, 0, 1, MODE_RAY)
+        func = lambda: _self._mpng(prefix, int(first) - 1, int(last) - 1,
                 int(preserve), int(modal), -1, int(mode), int(quiet),
                 int(width), int(height))
-
-        if _self.is_gui_thread():
-            r = _self._mpng(*args)
-        else:
-            r = _self.do('cmd._mpng(*%s)' % repr(args), 0)
-        if _self._raising(r,_self): raise pymol.CmdException
-        return r
+        if mode == MODE_RAY or mode == MODE_DEFAULT and _self.get_setting_boolean(
+                "ray_trace_frames"):
+            return func()
+        return _self._call_with_opengl_context(func)
 
     def mclear(_self=cmd):
         '''
@@ -489,14 +486,8 @@ SEE ALSO
 
     count_states
         '''
-        r = DEFAULT_ERROR
-        try:
-            _self.lock(_self)
-            r = _cmd.frame(_self._COb, int(frame) - 1, int(trigger))
-        finally:
-            _self.unlock(r,_self)
-        if _self._raising(r,_self): raise pymol.CmdException
-        return r
+        with _self.lockcm:
+            return _cmd.frame(_self._COb, int(frame) - 1, int(trigger))
 
     def mmove(target,source=0,count=-1,freeze=0,object='',quiet=1,_self=cmd):
         '''
@@ -739,7 +730,7 @@ SEE ALSO
         try:
             _self.lock(_self)
             output=[]
-            input = re.sub("\s"," ",specification)
+            input = re.sub(r"\s"," ",specification)
             input = input.replace("x"," x");
             input = input.replace("-"," -");
             input = input.replace("x ","x");

@@ -14,7 +14,9 @@
 #include <mmtf_parser.h>
 
 #include <algorithm>
+#include <vector>
 
+#include "pymol/zstring_view.h"
 #include "AssemblyHelpers.h"
 #include "AtomInfo.h"
 #include "Err.h"
@@ -36,7 +38,7 @@ const char ss_map[] = {
     0
 };
 
-/*
+/**
  * Get the assembly coordinate sets
  *
  * See also: read_pdbx_struct_assembly (CifMoleculeReader.cpp)
@@ -168,20 +170,22 @@ ObjectMolecule * ObjectMoleculeReadMmtfStr(PyMOLGlobals * G, ObjectMolecule * I,
   bool use_auth = SettingGetGlobal_b(G, cSetting_cif_use_auth);
 
   // symmetry
-  if (container->unitCell &&
-      container->spaceGroup &&
+  if (container->spaceGroup &&
       container->spaceGroup[0]) {
-    CSymmetry * symmetry = I->Symmetry = new CSymmetry(G);
+    I->Symmetry.reset(new CSymmetry(G));
+    I->Symmetry->Crystal.setDims(container->unitCell);
+    I->Symmetry->Crystal.setAngles(container->unitCell + 3);
+    I->Symmetry->setSpaceGroup(container->spaceGroup);
+  }
 
-    for (int i = 0; i < 3; i++) {
-      symmetry->Crystal.Dim[i] = container->unitCell[i];
-      symmetry->Crystal.Angle[i] = container->unitCell[i + 3];
+  // entities
+  auto chain2entity = std::vector<MMTF_Entity const*>(container->numChains);
+  for (int entityIndex = 0; entityIndex < container->entityListCount; ++entityIndex) {
+    auto const entity = &container->entityList[entityIndex];
+
+    for (int i = 0; i < entity->chainIndexListCount; ++i) {
+      chain2entity[entity->chainIndexList[i]] = entity;
     }
-
-    strncpy(symmetry->SpaceGroup, container->spaceGroup, WordLength - 1);
-
-    SymmetryUpdate(symmetry);
-    CrystalUpdate(&symmetry->Crystal);
   }
 
   // models (states)
@@ -189,13 +193,15 @@ ObjectMolecule * ObjectMoleculeReadMmtfStr(PyMOLGlobals * G, ObjectMolecule * I,
     int modelChainCount = container->chainsPerModel[modelIndex];
 
     CoordSet * cset = CoordSetNew(G);
-    cset->Coord = pymol::vla<float>(3 * nindexEstimate);
-    cset->IdxToAtm = pymol::vla<int>(nindexEstimate);
+    cset->Coord.reserve(3 * nindexEstimate);
+    cset->IdxToAtm.reserve(nindexEstimate);
     cset->Obj = I;
     I->CSet[modelIndex] = cset;
 
     // chains
     for (int j = 0; j < modelChainCount; ++j, ++chainIndex) {
+      auto const entity = chain2entity[chainIndex];
+
       if (container->chainNameList)
         LexAssign(G, tai.chain, container->chainNameList[chainIndex]);
       if (use_auth)
@@ -215,7 +221,11 @@ ObjectMolecule * ObjectMoleculeReadMmtfStr(PyMOLGlobals * G, ObjectMolecule * I,
         }
 
         LexAssign(G, tai.resn, group->groupName);
-        tai.hetatm = group->singleLetterCode == '?';
+        if (entity) {
+          tai.hetatm = pymol::null_safe_zstring_view(entity->type) != "polymer";
+        } else {
+          tai.hetatm = group->singleLetterCode == '?';
+        }
         tai.flags = tai.hetatm ? cAtomFlag_ignore : 0;
 
         if (use_auth) {
@@ -268,11 +278,10 @@ ObjectMolecule * ObjectMoleculeReadMmtfStr(PyMOLGlobals * G, ObjectMolecule * I,
             ai->color = container->pymolColorList[atomIndex];
           }
 
-          VLACheck(cset->IdxToAtm, int, cset->NIndex);
-          VLACheck(cset->Coord, float, 3 * cset->NIndex + 2);
-          cset->IdxToAtm[cset->NIndex] = atomIndex;
-          float * coord = cset->coordPtr(cset->NIndex);
-          cset->NIndex++;
+          auto const idx = cset->getNIndex();
+          cset->setNIndex(idx + 1);
+          cset->IdxToAtm[idx] = atomIndex;
+          float* coord = cset->coordPtr(idx);
 
           coord[0] = container->xCoordList[atomIndex];
           coord[1] = container->yCoordList[atomIndex];
@@ -281,8 +290,7 @@ ObjectMolecule * ObjectMoleculeReadMmtfStr(PyMOLGlobals * G, ObjectMolecule * I,
       }
     }
 
-    VLASize(cset->Coord, float, 3 * cset->NIndex);
-    VLASize(cset->IdxToAtm, int, cset->NIndex);
+    assert(cset->IdxToAtm.size() == cset->getNIndex());
   }
 
   if (atomIndex != I->NAtom) {

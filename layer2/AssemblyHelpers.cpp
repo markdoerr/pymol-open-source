@@ -11,7 +11,7 @@
 #include "AssemblyHelpers.h"
 #include "MemoryDebug.h"
 
-/*
+/**
  * Create a coordset for a segi (chain) selection
  */
 CoordSet * CoordSetCopyFilterChains(
@@ -26,11 +26,9 @@ CoordSet * CoordSetCopyFilterChains(
     if (chains_set.count(atInfo[other->IdxToAtm[idx]].segi) > 0)
       idxmap.push_back(idx);
 
-  CoordSet * cset = CoordSetNew(other->State.G);
+  CoordSet* cset = new CoordSet(other->G);
 
-  cset->NIndex = idxmap.size();
-  cset->Coord = pymol::vla<float>(cset->NIndex * 3);
-  cset->IdxToAtm = pymol::vla<int>(cset->NIndex);
+  cset->setNIndex(idxmap.size());
   cset->Obj = other->Obj;
 
   for (int idx = 0; idx < cset->NIndex; ++idx) {
@@ -41,7 +39,7 @@ CoordSet * CoordSetCopyFilterChains(
   return cset;
 }
 
-/*
+/**
  * Replace coordinate sets and set all_states
  */
 void ObjectMoleculeSetAssemblyCSets(
@@ -58,8 +56,7 @@ void ObjectMoleculeSetAssemblyCSets(
 
   // remove asymetric unit coordinate sets
   for (int i = 0; i < I->NCSet; ++i)
-    if (I->CSet[i])
-      I->CSet[i]->fFree();
+    delete I->CSet[i];
 
   VLAFreeP(I->CSet);
 

@@ -12,8 +12,6 @@
 #-*
 #Z* -------------------------------------------------------------------
 
-from __future__ import print_function
-
 import sys
 cmd = sys.modules["pymol.cmd"]
 import math
@@ -21,6 +19,7 @@ import os
 import glob
 import threading
 import time
+from . import colorprinting
 
 def get_movie_fps(_self):
     r = _self.get_setting_float('movie_fps')
@@ -52,19 +51,13 @@ def pause(pause=15,cycles=1,_self=cmd):
     movie_string = " ".join(movie_list)
     _self.mset(movie_string)
 
-def load(*args,**kw):
-    _self = kw.get('_self',cmd)
-    nam = "mov"
-    if len(args)>1:
-        nam = args[1]
-    fils = glob.glob(args[0])
-    fils.sort()
-    if not len(fils):
+def load(pattern, nam = "mov", _self=cmd, **kw):
+    fils = glob.glob(pattern)
+    if not fils:
         print("Error: no matching files")
-    else:
-        for a in fils:
-            _self.load(*(a,nam), **kw)
-#         _self.load(a,nam)
+        return
+    for a in sorted(fils):
+        _self.load(a, nam, **kw)
 
 def rock(first=1,last=-1,angle=30,phase=0,loop=1,axis='y',_self=cmd):
     first=int(first)
@@ -723,14 +716,14 @@ def _encode(filename,first,last,preserve,
 
     if done and ok and (encoder == 'mpeg_encode'):
         try:
-            from freemol import mpeg_encode
+            from pymol import mpeg_encode
         except:
             ok = 0
-            print("produce-error: Unable to import module freemol.mpeg_encode.")
+            print("produce-error: Unable to import module pymol.mpeg_encode.")
         if ok:
             if not mpeg_encode.validate():
                 ok = 0
-                print("produce-error: Unable to validate freemol.mpeg_encode.")
+                print("produce-error: Unable to validate pymol.mpeg_encode.")
         if not ok:
             print("produce-error: Unable to create mpeg file.")
         else:
@@ -741,7 +734,6 @@ def _encode(filename,first,last,preserve,
             FPS_LEGAL_VALUES = [23.976, 24, 25, 29.97, 30, 50, 59.94, 60]
             fps_legal = min(FPS_LEGAL_VALUES, key=lambda v: abs(v - fps))
             if fps_legal != round(fps, 3):
-                from . import colorprinting
                 colorprinting.warning(
                     " Warning: Adjusting frame rate to {} fps (legal values are: {})"
                     .format(fps_legal, FPS_LEGAL_VALUES))
@@ -773,12 +765,20 @@ def _encode(filename,first,last,preserve,
                 '-framerate', '{:.3f}'.format(fps),
                 '-i', prefix + '%04d' + img_ext,
             ]
-            if not fn_rel.endswith('.gif'):
+            if fn_rel.endswith('.webm'):
+                args_crf = ['-crf', '{:.0f}'.format(65 - (quality / 2))]
+                args += ['-c:v', 'libvpx-vp9', '-b:v', '0'] + args_crf
+            elif not fn_rel.endswith('.gif'):
                 args += [
                 '-crf', '10' if quality > 90 else '15' if quality > 80 else '20',
                 '-pix_fmt', 'yuv420p', # needed for Mac support
                 ]
-            subprocess.check_call(args + [fn_rel])
+            process = subprocess.Popen(args + [fn_rel], stderr=subprocess.PIPE)
+            stderr = process.communicate()[1]
+            colorprinting.warning(stderr.strip().decode(errors='replace'))
+            if process.returncode != 0:
+                colorprinting.error('ffmpeg failed with '
+                        'exit status {}'.format(process.returncode))
         finally:
             os.chdir(old_cwd)
     elif encoder == 'convert':
@@ -815,26 +815,25 @@ produce_mode_sc = cmd.Shortcut(produce_mode_dict.keys())
 
 
 def find_exe(exe):
-    '''Return full path to executable or None.
+    r'''Return full path to executable or None.
     Excludes C:\Windows\System32\convert.exe
     Tests .exe extension on Unix (e.g. for legacy "mpeg_encode.exe" name).
     '''
-    from distutils.spawn import find_executable
-
-    path = os.getenv('PATH', '')
+    from shutil import which
 
     if exe.startswith('convert') and sys.platform == 'win32':
         # filter out C:\Windows\System32
         path = os.pathsep.join(p
-                for p in path.split(os.pathsep)
+                for p in os.getenv('PATH', '').split(os.pathsep)
                 if r'\windows\system32' not in p.lower())
+        return which(exe, path=path)
 
-    e = find_executable(exe, path)
+    if exe == 'mpeg_encode':
+        legacy = which(exe + '.exe')
+        if legacy:
+            return legacy
 
-    if not e and sys.platform != 'win32':
-        e = find_executable(exe + '.exe', path)
-
-    return e
+    return which(exe)
 
 
 def produce(filename, mode='', first=0, last=0, preserve=0,
@@ -843,13 +842,14 @@ def produce(filename, mode='', first=0, last=0, preserve=0,
     '''
 DESCRIPTION
 
-    Export a movie to an MPEG file.
+    Export a movie to an MPEG, WEBM, or GIF file.
 
-    Requires FREEMOL.
+    Which video formats and codecs are available depends on the availability
+    and feature set of your ffmpeg and ImageMagick installations.
 
 ARGUMENTS
 
-    filename = str: filename of MPEG file to produce
+    filename = str: filename of movie file to produce
 
     mode = draw or ray: {default: check "ray_trace_frames" setting}
 
@@ -859,7 +859,18 @@ ARGUMENTS
 
     preserve = 0 or 1: don't delete temporary files {default: 0}
 
+    encoder = ffmpeg|convert|mpeg_encode: Tool used for video encoding
+
     quality = 0-100: encoding quality {default: 90 (movie_quality setting)}
+
+    width = int: Width in pixels {default: from viewport}
+
+    height = int: Height in pixels {default: from viewport}
+
+EXAMPLE
+
+    movie.produce video.mp4, height=1080
+    movie.produce video.webm, height=720
     '''
     from pymol import CmdException
 
@@ -909,11 +920,6 @@ ARGUMENTS
     # check encoder
     if encoder == 'mpeg_encode':
         img_ext = '.ppm'
-        try:
-            from freemol import mpeg_encode
-        except ImportError:
-            print(" Error: This PyMOL build is not set up with FREEMOL (freemol.mpeg_encode import failed)")
-            return _self.DEFAULT_ERROR
     elif encoder not in ('ffmpeg', 'convert'):
         raise CmdException('unknown encoder "%s"' % encoder)
     elif not has_exe(encoder):
@@ -923,7 +929,7 @@ ARGUMENTS
         _self.set('opaque_background', quiet=quiet)
 
     # MP4 needs dimensions divisible by 2
-    if splitext[1] in ('.mp4', '.mov'):
+    if splitext[1] in ('.mp4', '.mov', '.webm'):
         if width < 1 or height < 1:
             w, h = _self.get_viewport()
             if width > 0:

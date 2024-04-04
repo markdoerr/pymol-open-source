@@ -25,19 +25,18 @@ Z* -------------------------------------------------------------------
 #include"pymol/memory.h"
 
 struct ObjectAlignmentState {
-  CObjectState state;
   pymol::vla<int> alignVLA;
   WordType guide;
   /* not stored */
   int valid;
   std::unordered_map<int, int> id2tag;
-  pymol::cache_ptr<CGO, CGODeleter> primitiveCGO;
-  pymol::cache_ptr<CGO, CGODeleter> renderCGO;
+  pymol::cache_ptr<CGO> primitiveCGO;
+  pymol::cache_ptr<CGO> renderCGO;
   bool renderCGO_has_cylinders;
   bool renderCGO_has_trilines;
 };
 
-struct ObjectAlignment : public CObject {
+struct ObjectAlignment : public pymol::CObject {
   std::vector<ObjectAlignmentState> State;
   int SelectionState = -1;
   int ForceState = -1;
@@ -46,8 +45,9 @@ struct ObjectAlignment : public CObject {
   // virtual methods
   void update() override;
   void render(RenderInfo* info) override;
-  void invalidate(int rep, int level, int state) override;
+  void invalidate(cRep_t rep, cRepInv_t level, int state) override;
   int getNFrame() const override;
+  pymol::CObject* clone() const override;
 };
 
 ObjectAlignment *ObjectAlignmentDefine(PyMOLGlobals * G,
@@ -62,7 +62,7 @@ void ObjectAlignmentRecomputeExtent(ObjectAlignment * I);
 PyObject *ObjectAlignmentAsPyList(ObjectAlignment * I);
 
 int ObjectAlignmentNewFromPyList(PyMOLGlobals * G, PyObject * list,
-                                 ObjectAlignment ** result, int version);
+				     ObjectAlignment ** result, int version);
 
 int ObjectAlignmentAsStrVLA(PyMOLGlobals * G, ObjectAlignment * I, int state, int format,
                             char **str_vla);

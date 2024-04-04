@@ -38,11 +38,27 @@ inline float DIP2PIXEL(float v) { return v * _gScaleFactor; }
 typedef int lexidx_t;
 typedef int lexborrow_t;
 
+
+constexpr unsigned int OrthoLineLength = 1024u;
+using OrthoLineType = char[OrthoLineLength];
+
+constexpr unsigned int WordLength = 256u;
+using WordType = char[WordLength];
+
+using SelectorID_t = int;
+using SelectorMemberOffset_t = int;
+
+using StateIndex_t = int; ///< 0-based state index (C/C++/JavaScript)
+using StateIndexPython_t = int; ///< 1-based state index (Python/Settings)
+
+constexpr StateIndex_t cStateAll = -1;
+constexpr StateIndex_t cStateCurrent = -2;
+
 typedef struct _CMemoryCache CMemoryCache;
 struct CIsosurf;
 typedef struct _CTetsurf CTetsurf;
 typedef struct _CSphere CSphere;
-struct CFeedback;
+class CFeedback;
 typedef struct _CUtil CUtil;
 struct CColor;
 struct CMovie;
@@ -50,27 +66,27 @@ struct CControl;
 struct CButMode;
 class COrtho;
 typedef struct _CWord CWord;
-typedef struct _CCGORenderer CCGORenderer;
+struct CCGORenderer;
 typedef struct _CCharacter CCharacter;
 struct CPop;
 class CScene;
 struct CSeq;
-typedef struct _CSetting CSetting;
-typedef struct _CSettingUnique CSettingUnique;
+struct CSetting;
+struct CSettingUnique;
 struct CText;
 struct CWizard;
-typedef struct _CAtomInfo CAtomInfo;
+struct CAtomInfo;
 typedef struct _CSculptCache CSculptCache;
 typedef struct _CVFont CVFont;
 typedef struct _CEditor CEditor;
 struct CExecutive;
-typedef struct _CSeeker CSeeker;
+struct CSeeker;
 struct CSelector;
 struct CSelectorManager;
-typedef struct _CTexture CTexture;
+struct CTexture;
 typedef struct _CType CType;
 typedef struct _CMain CMain;
-typedef struct _CPlugIOManager CPlugIOManager;
+struct CPlugIOManager;
 struct COpenVR;
 struct ObjectMolecule;
 
@@ -96,16 +112,8 @@ typedef struct _OVContext OVContext;
 #define OVCONTEXT_DEFINED
 #endif
 
-#ifndef OVONETOONE_DEFINED
-typedef struct _OVOneToOne OVOneToOne;
-#define OVONETOONE_DEFINED
-#endif
-
-
-struct CObject;
-
 #ifndef CPyMOL_DEFINED
-typedef struct _CPyMOL CPyMOL;
+struct CPyMOL;
 #define CPyMOL_DEFINED
 #endif
 
@@ -114,11 +122,12 @@ class CGO;
 #define CGO_DEFINED
 #endif
 
+class GFXManager;
+
 #define cPyMOLGlobals_LaunchStatus_StereoFailed 0x1
 #define cPyMOLGlobals_LaunchStatus_MultisampleFailed 0x2
 
-typedef struct _PyMOLGlobals PyMOLGlobals;
-struct _PyMOLGlobals {
+struct PyMOLGlobals {
 
   /* singleton objects */
 
@@ -162,7 +171,7 @@ struct _PyMOLGlobals {
   CPlugIOManager *PlugIOManager;
   CShaderMgr* ShaderMgr;
   COpenVR* OpenVR;
-
+  GFXManager* GFXMgr;
 #ifndef _PYMOL_NOPY
   CP_inst *P_inst;
 #endif
@@ -219,11 +228,5 @@ struct _PyMOLGlobals {
 #ifndef _PYMOL_NOPY
 extern PyMOLGlobals *SingletonPyMOLGlobals;
 #endif
-
-#define ORTHOCGOARG , CGO *orthoCGO
-#define ORTHOCGOARGB  orthoCGO
-#define ORTHOCGOARGVAR , orthoCGO
-#define ORTHOFASTCGOARGVAR , orthoFastCGO
-#define ORTHOCGOARGNULL , NULL
 
 #endif

@@ -20,11 +20,11 @@ Z* -------------------------------------------------------------------
 #include"os_std.h"
 
 #include"Base.h"
-#include"OOMac.h"
 #include"MemoryDebug.h"
 #include"Err.h"
 #include"Scene.h"
 #include"GadgetSet.h"
+#include"ObjectGadget.h"
 #include"Color.h"
 #include"PConv.h"
 #include"main.h"
@@ -32,7 +32,7 @@ Z* -------------------------------------------------------------------
 #include"ShaderMgr.h"
 #include"Ray.h"
 
-int GadgetSetGetVertex(GadgetSet * I, int index, int base, float *v)
+int GadgetSetGetVertex(const GadgetSet * I, int index, int base, float *v)
 {
   int ok = true;
   float *v0, *v1;
@@ -56,7 +56,7 @@ int GadgetSetGetVertex(GadgetSet * I, int index, int base, float *v)
   return (ok);
 }
 
-int GadgetSetSetVertex(GadgetSet * I, int index, int base, float *v)
+int GadgetSetSetVertex(GadgetSet * I, int index, int base, const float *v)
 {
   int ok = true;
   float *v0, *v1;
@@ -92,7 +92,7 @@ int GadgetSetFromPyList(PyMOLGlobals * G, PyObject * list, GadgetSet ** gs, int 
   PyObject *tmp = NULL;
 
   if(*gs) {
-    (*gs)->fFree();
+    delete *gs;
     *gs = NULL;
   }
 
@@ -143,7 +143,7 @@ int GadgetSetFromPyList(PyMOLGlobals * G, PyObject * list, GadgetSet ** gs, int 
 
     if(!ok) {
       if(I)
-        I->fFree();
+        delete I;
     } else {
       *gs = I;
     }
@@ -216,43 +216,8 @@ int GadgetSetGetExtent(GadgetSet * I, float *mn, float *mx)
 
 
 /*========================================================================*/
-void GadgetSet::invalidateRep(int type, int level)
+void GadgetSet::invalidateRep(cRep_t type, cRepInv_t level)
 {
-#if TO_DO
-  GadgetSet * I = this;
-  int a;
-  PRINTFD(I->G, FB_GadgetSet)
-    " GadgetSetInvalidateRep: entered.\n" ENDFD;
-  if(type >= 0) {
-    if(type < I->NRep) {
-      SceneChanged(I->G);
-      if(I->Rep[type]) {
-        I->Rep[type]->fFree(I->Rep[type]);
-        I->Rep[type] = NULL;
-      }
-    }
-  } else {
-    for(a = 0; a < I->NRep; a++) {
-      SceneChanged(I->G);
-      if(I->Rep[a]) {
-        switch (level) {
-        case cRepInvColor:
-          if(I->Rep[a]->fRecolor) {
-            I->Rep[a]->fInvalidate(I->Rep[a], (struct CoordSet *) I, level);
-          } else {
-            I->Rep[a]->fFree(I->Rep[a]);
-            I->Rep[a] = NULL;
-          }
-          break;
-        default:
-          I->Rep[a]->fFree(I->Rep[a]);
-          I->Rep[a] = NULL;
-          break;
-        }
-      }
-    }
-  }
-#endif
 }
 
 
@@ -277,7 +242,7 @@ void GadgetSet::update()
 void GadgetSet::render(RenderInfo * info)
 {
   GadgetSet * I = this;
-  int pass = info->pass;
+  const RenderPass pass = info->pass;
   CRay *ray = info->ray;
   auto pick = info->pick;
   const float *color;
@@ -288,7 +253,7 @@ void GadgetSet::render(RenderInfo * info)
 
   color = ColorGet(I->G, I->Obj->Color);
 
-  if(pass < 0 || ray || pick) {
+  if(pass == RenderPass::Transparent || ray || pick) {
     PyMOLGlobals *G = I->G;
 
     if(ray) {
@@ -300,7 +265,7 @@ void GadgetSet::render(RenderInfo * info)
 	RayPushTTT(ray);
 	RaySetTTT(ray, true, mat);  /* Used to set the ray-tracing matrix,
 				       this works, but is there another way to do this? */
-	CGORenderRay(I->ShapeCGO, ray, info, color, NULL, I->Obj->Setting, NULL);
+	CGORenderRay(I->ShapeCGO, ray, info, color, NULL, I->Obj->Setting.get(), NULL);
 	RayPopTTT(ray);
       }
     } else if(G->HaveGUI && G->ValidContext) {
@@ -335,12 +300,12 @@ void GadgetSet::render(RenderInfo * info)
 	}
         if(I->PickCGO) {
 	  if (use_shader){
-	    CGORenderGLPicking(I->PickCGO, info, &context, I->Obj->Setting, NULL);
+	    CGORenderPicking(I->PickCGO, info, &context, I->Obj->Setting.get(), NULL);
 #ifndef PURE_OPENGL_ES_2
 	  } else {
 	    glDisable(GL_DEPTH_TEST);
 	    glTranslatef(I->Coord[0],I->Coord[1],I->Coord[2]);
-	    CGORenderGLPicking(I->PickShapeCGO, info, &context, I->Obj->Setting, NULL);
+	    CGORenderPicking(I->PickShapeCGO, info, &context, I->Obj->Setting.get(), NULL);
 	    glTranslatef(-I->Coord[0],-I->Coord[1],-I->Coord[2]);
 	    glEnable(GL_DEPTH_TEST);
 #endif
@@ -348,41 +313,32 @@ void GadgetSet::render(RenderInfo * info)
         }
       } else {
 	if (!I->StdCGO && I->ShapeCGO){
-	  CGO *convertcgo;
-	  int ok = true;
-	  convertcgo = CGOCombineBeginEnd(I->ShapeCGO, 0);
-	  CHECKOK(ok, convertcgo);
-	  if (ok){
-	    if (use_shader){
-	      CGO *tmpCGO;
-	      tmpCGO = CGOOptimizeToVBONotIndexedNoShader(convertcgo, 0);
-	      I->StdCGO = CGONew(G);
-	      CGODisable(I->StdCGO, GL_DEPTH_TEST);
-	      CGOEnable(I->StdCGO, GL_RAMP_SHADER);
-	      I->offsetPtOP = CGOUniform3f(I->StdCGO, RAMP_OFFSETPT,  (const float*)I->Coord);
-	      CGOAppendNoStop(I->StdCGO, tmpCGO);
-	      CGOFreeWithoutVBOs(tmpCGO);
-	      CGODisable(I->StdCGO, GL_RAMP_SHADER);
-	      CGOEnable(I->StdCGO, GL_DEPTH_TEST);
-	      CGOStop(I->StdCGO);
-	      I->StdCGO->use_shader = true;
-	      CGOFree(convertcgo);
-	    } else {
-	      I->StdCGO = convertcgo;
-	    }
-	  } else {
-	    CGOFree(convertcgo);
-	  }
+          if (!use_shader) {
+            I->StdCGO = CGOCombineBeginEnd(I->ShapeCGO);
+            assert(!I->StdCGO->has_begin_end);
+          } else {
+            I->StdCGO = CGONew(G);
+            CGODisable(I->StdCGO, GL_DEPTH_TEST);
+            CGOEnable(I->StdCGO, GL_RAMP_SHADER);
+            I->offsetPtOP = CGOUniform3f(I->StdCGO, RAMP_OFFSETPT, I->Coord);
+            I->StdCGO->free_append(
+                CGOOptimizeToVBONotIndexedNoShader(I->ShapeCGO));
+            CGODisable(I->StdCGO, GL_RAMP_SHADER);
+            CGOEnable(I->StdCGO, GL_DEPTH_TEST);
+            CGOStop(I->StdCGO);
+            assert(I->StdCGO->use_shader);
+            assert(!I->StdCGO->has_begin_end);
+          }
 	}
         if(I->StdCGO) {
 	  if (use_shader){
 	    if (color)
-              CGORenderGL(I->StdCGO, NULL, I->Obj->Setting, NULL, info, NULL);
+              CGORender(I->StdCGO, NULL, I->Obj->Setting.get(), NULL, info, NULL);
 #ifndef PURE_OPENGL_ES_2
 	  } else {
 	    glDisable(GL_DEPTH_TEST);
 	    glTranslatef(I->Coord[0],I->Coord[1],I->Coord[2]);
-	    CGORenderGL(I->ShapeCGO, NULL, I->Obj->Setting, NULL, info, NULL);
+	    CGORender(I->ShapeCGO, NULL, I->Obj->Setting.get(), NULL, info, NULL);
 	    glTranslatef(-I->Coord[0],-I->Coord[1],-I->Coord[2]);
 	    glEnable(GL_DEPTH_TEST);
 #endif
@@ -397,28 +353,14 @@ void GadgetSet::render(RenderInfo * info)
 /*========================================================================*/
 GadgetSet *GadgetSetNew(PyMOLGlobals * G)
 {
-  OOAlloc(G, GadgetSet);
+  auto I = new GadgetSet();
   I->G = G;
-  I->NCoord = 0;
-  I->NColor = 0;
-  I->NNormal = 0;
-  I->Coord = NULL;
-  I->Normal = NULL;
-  I->Color = NULL;
-  I->Setting = NULL;
-  I->PickCGO = NULL;
-  I->StdCGO = NULL;
-  I->ShapeCGO = NULL;
-  I->PickShapeCGO = NULL;
-  I->offsetPtOP = 0;
-  I->offsetPtOPick = 0;
-
   return (I);
 }
 
 
 /*========================================================================*/
-void GadgetSet::fFree()
+GadgetSet::~GadgetSet()
 {
   GadgetSet * I = this;
   if(I) {
@@ -426,11 +368,21 @@ void GadgetSet::fFree()
     CGOFree(I->PickShapeCGO);
     CGOFree(I->StdCGO);
     CGOFree(I->ShapeCGO);
-    I->offsetPtOP = 0;
-    I->offsetPtOPick = 0;
     VLAFreeP(I->Coord);
     VLAFreeP(I->Normal);
     VLAFreeP(I->Color);
-    OOFreeP(I);
   }
+}
+
+/**
+ * Retrieve coordinate buffer of Gadget set
+ * @param I target Gadget set
+ */
+
+std::vector<float> GadgetSetGetCoord(const GadgetSet* I)
+{
+  std::vector<float> result;
+  result.resize(VLAGetSize(I->Coord));
+  std::copy_n(I->Coord, result.size(), result.data());
+  return result;
 }

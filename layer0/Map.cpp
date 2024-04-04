@@ -20,12 +20,13 @@ Z* ------------------------------------------------------------------- */
 
 #include"MemoryDebug.h"
 #include"Err.h"
-#include"OOMac.h"
 #include"Map.h"
 #include"Setting.h"
 #include"Feedback.h"
 #include"MemoryCache.h"
 #include"Base.h"
+
+#include "pymol/algorithm.h"
 
 static MapType *_MapNew(PyMOLGlobals * G, float range, const float *vert, int nVert,
                         const float *extent, const int *flag, int group_id, int block_id);
@@ -35,9 +36,10 @@ float MapGetDiv(MapType * I)
   return I->Div;
 }
 
-void MapFree(MapType * I)
+MapType::~MapType()
 {
-  if(I) {
+  auto I = this;
+  {
     CacheFreeP(I->G, I->Head, I->group_id, I->block_base + cCache_map_head_offset, false);
     CacheFreeP(I->G, I->Link, I->group_id, I->block_base + cCache_map_link_offset, false);
     CacheFreeP(I->G, I->EHead, I->group_id, I->block_base + cCache_map_ehead_offset,
@@ -47,7 +49,6 @@ void MapFree(MapType * I)
     VLACacheFreeP(I->G, I->EList, I->group_id, I->block_base + cCache_map_elist_offset,
                   false);
   }
-  OOFreeP(I);
 }
 
 int MapCacheInit(MapCache * M, MapType * I, int group_id, int block_base)
@@ -112,68 +113,6 @@ void MapCacheFree(MapCache * M, int group_id, int block_base)
 }
 
 #define MapSafety 0.01F
-
-int MapInside(MapType * I, const float *v, int *a, int *b, int *c)
-{                               /* special version for ray-tracing */
-  int atmp, btmp, ctmp;
-  float iDiv = I->recipDiv;
-
-  atmp = (int) ((v[0] - I->Min[0]) * iDiv) + MapBorder;
-  btmp = (int) ((v[1] - I->Min[1]) * iDiv) + MapBorder;
-  ctmp = (int) ((v[2] - I->Min[2]) * iDiv) + MapBorder;
-
-  if(atmp < I->iMin[0]) {
-    if((I->iMin[0] - atmp) > 3)
-      return (-1);
-    else
-      atmp = I->iMin[0];
-  } else if(atmp > I->iMax[0]) {
-    if((atmp - I->iMax[0]) > 3)
-      return (-1);
-    else
-      atmp = I->iMax[0];
-  }
-
-  if(btmp < I->iMin[1]) {
-    if((I->iMin[1] - btmp) > 3)
-      return (-1);
-    else
-      btmp = I->iMin[1];
-  } else if(btmp > I->iMax[1]) {
-    if((btmp - I->iMax[1]) > 3)
-      return (-1);
-    else
-      btmp = I->iMax[1];
-  }
-
-  /*    printf("%d %d %d\n",ctmp,I->iMin[2],I->iMax[2]); */
-  if(ctmp < I->iMin[2]) {
-    if((I->iMin[2] - ctmp) > 3)
-      return (-1);
-    else
-      ctmp = I->iMin[2];
-  } else if(ctmp > I->iMax[2]) {
-    if((ctmp - I->iMax[2]) > 3)
-      return (0);               /* just keep searching... */
-    else
-      ctmp = I->iMax[2];
-  }
-
-  /*   printf("%d %d %d %d %d %d %d %d %d\n",
-     atmp,I->iMin[0],I->iMax[0],
-     btmp,I->iMin[1],I->iMax[1],
-     ctmp,I->iMin[2],I->iMax[2]);
-   */
-
-  if(!*(MapEStart(I, atmp, btmp, ctmp)))
-    return (0);
-
-  *a = atmp;
-  *b = btmp;
-  *c = ctmp;
-
-  return (1);
-}
 
 int MapInsideXY(MapType * I, const float *v, int *a, int *b, int *c)
 {                               /* special version for ray-tracing */
@@ -659,7 +598,13 @@ int MapSetupExpress(MapType * I)
   return ok;
 }
 
-void MapLocus(MapType * I, const float *v, int *a, int *b, int *c)
+/**
+ * Get the grid indices for a 3D query point. If the point is outside the grid,
+ * get the indices of the closest grid cell (clamp `v` to grid boundary).
+ * @param v 3D query point
+ * @param[out] a,b,c
+ */
+void MapLocus(const MapType * I, const float *v, int *a, int *b, int *c)
 {
   int at, bt, ct;
   float invDiv = I->recipDiv;
@@ -668,50 +613,32 @@ void MapLocus(MapType * I, const float *v, int *a, int *b, int *c)
   bt = (int) ((v[1] - I->Min[1]) * invDiv) + MapBorder;
   ct = (int) ((v[2] - I->Min[2]) * invDiv) + MapBorder;
 
-  /* range checking... */
-  if(at < I->iMin[0])
-    at = I->iMin[0];
-  else if(at > I->iMax[0])
-    at = I->iMax[0];
-
-  if(bt < I->iMin[1])
-    bt = I->iMin[1];
-  else if(bt > I->iMax[1])
-    bt = I->iMax[1];
-
-  if(ct < I->iMin[2])
-    ct = I->iMin[2];
-  else if(ct > I->iMax[2])
-    ct = I->iMax[2];
-
-  *a = at;
-  *b = bt;
-  *c = ct;
+  *a = pymol::clamp(at, I->iMin[0], I->iMax[0]);
+  *b = pymol::clamp(bt, I->iMin[1], I->iMax[1]);
+  *c = pymol::clamp(ct, I->iMin[2], I->iMax[2]);
 }
 
+/**
+ * Get EList start index for points in proximity to `v`.
+ * Clamps `v` to grid boundaries.
+ * @param v 3D query point
+ * @return pointer to EList start index
+ */
 int *MapLocusEStart(MapType * I, const float *v)
 {
   int a, b, c;
-  float invDiv = I->recipDiv;
-  a = (int) (((v[0] - I->Min[0]) * invDiv) + MapBorder);
-  b = (int) (((v[1] - I->Min[1]) * invDiv) + MapBorder);
-  c = (int) (((v[2] - I->Min[2]) * invDiv) + MapBorder);
-  if(a < I->iMin[0])
-    a = I->iMin[0];
-  else if(a > I->iMax[0])
-    a = I->iMax[0];
-  if(b < I->iMin[1])
-    b = I->iMin[1];
-  else if(b > I->iMax[1])
-    b = I->iMax[1];
-  if(c < I->iMin[2])
-    c = I->iMin[2];
-  else if(c > I->iMax[2])
-    c = I->iMax[2];
-  return (I->EHead + ((a) * I->D1D2) + ((b) * I->Dim[2]) + (c));
+  MapLocus(I, v, &a, &b, &c);
+  return MapEStart(I, a, b, c);
 }
 
-int MapExclLocus(MapType * I, const float *v, int *a, int *b, int *c)
+/**
+ * Get the grid indices for a 3D query point. If the point is outside the grid,
+ * return false and leave (a,b,c) in an unspecified state.
+ * @param v 3D query point
+ * @param[out] a,b,c Grid indices, but only if function returned true.
+ * @return True if `v` is within grid boundaries
+ */
+static bool MapExclLocus(MapType* I, const float* v, int* a, int* b, int* c)
 {
   float invDiv = I->recipDiv;
 
@@ -731,6 +658,19 @@ int MapExclLocus(MapType * I, const float *v, int *a, int *b, int *c)
   else if(*c > I->iMax[2])
     return (0);
   return (1);
+}
+
+/**
+ * Return EList start index for points in proximity to `v`.
+ * Return 0 if `v` is outside the grid or there are no points.
+ * @param v 3D query point
+ */
+static int MapExclLocusEStart(MapType* map, const float* v)
+{
+  int h, k, l;
+  if (!MapExclLocus(map, v, &h, &k, &l))
+    return 0;
+  return *(MapEStart(map, h, k, l));
 }
 
 float MapGetSeparation(PyMOLGlobals * G, float range, const float *mx, const float *mn,
@@ -831,9 +771,7 @@ static MapType *_MapNew(PyMOLGlobals * G, float range, const float *vert, int nV
   Vector3f diagonal;
   int ok = true;
 
-  /* allocate space for a MapType 
-   * "I" is now defined */
-  OOAlloc(G, MapType);
+  auto I = new MapType();
   PRINTFD(G, FB_Map)
     " MapNew-Debug: entered.\n" ENDFD;
   CHECKOK(ok, I);
@@ -844,12 +782,6 @@ static MapType *_MapNew(PyMOLGlobals * G, float range, const float *vert, int nV
   I->G = G;
   I->group_id = group_id;
   I->block_base = block_base;
-  I->Head = NULL;
-  I->Link = NULL;
-  I->EHead = NULL;
-  I->EList = NULL;
-  I->EMask = NULL;
-  I->NEElem = 0;
 
   /* initialize an empty cache for the map */
   I->Link = CacheAlloc(G, int, nVert, group_id, block_base + cCache_map_link_offset);
@@ -1045,4 +977,38 @@ static MapType *_MapNew(PyMOLGlobals * G, float range, const float *vert, int nV
     " MapNew-Debug: leaving...\n" ENDFD;
 
   return (I);
+}
+
+MapEIter::MapEIter(MapType& map, const float* v, bool excl)
+{
+  if (!map.EList) {
+    MapSetupExpress(&map);
+  }
+
+  m_elist = map.EList;
+
+  if (excl) {
+    m_i = MapExclLocusEStart(&map, v);
+  } else {
+    m_i = *MapLocusEStart(&map, v);
+  }
+}
+
+/**
+ * True if `v_query` is within `cutoff` of any point in the map.
+ *
+ * @param map A hash map
+ * @param v_map The points used to build the map
+ * @param v_query A query point
+ * @param cutoff The distance cutoff
+ */
+bool MapAnyWithin(
+    MapType& map, const float* v_map, const float* v_query, float cutoff)
+{
+  for (const auto j : MapEIter(map, v_query)) {
+    if (within3f(v_map + 3 * j, v_query, cutoff)) {
+      return true;
+    }
+  }
+  return false;
 }

@@ -1,5 +1,3 @@
-from __future__ import print_function
-
 from pymol.wizard import Wizard
 from pymol import cmd
 import pymol
@@ -16,8 +14,7 @@ drag_sele = "_drag"
 
 class Dragging(Wizard):
 
-    def __init__(self,*arg,**kw):
-        _self = kw.get('_self',cmd)
+    def __init__(self, *arg, _self=cmd):
         self.valid = 1
         Wizard.__init__(self,_self)
         if len(arg):

@@ -15,7 +15,7 @@ I* Additional authors of this source file include:
 Z* -------------------------------------------------------------------
 */
 
-#include <set>
+#include <unordered_set>
 
 #include"os_python.h"
 
@@ -23,7 +23,6 @@ Z* -------------------------------------------------------------------
 #include"os_std.h"
 #include"os_gl.h"
 
-#include"OOMac.h"
 #include"ObjectAlignment.h"
 #include"Base.h"
 #include"MemoryDebug.h"
@@ -34,7 +33,6 @@ Z* -------------------------------------------------------------------
 #include"main.h"
 #include"Color.h"
 #include"Executive.h"
-#include"OVContext.h"
 #include"Util.h"
 #include"Selector.h"
 #include"Seq.h"
@@ -120,14 +118,14 @@ static int AlignmentFindTag(PyMOLGlobals * G, AtomInfoType * ai, int sele,
   return result;
 }
 
-/*
+/**
  * Get single letter abbreviation for CLUSTAL output.
  *
  * See also:
  * pymol.exporting._resn_to_aa
- * AtomInfoKnownNucleicResName
- * AtomInfoKnownProteinResName
- * SeekerGetAbbr
+ * AtomInfoKnownNucleicResName()
+ * AtomInfoKnownProteinResName()
+ * SeekerGetAbbr()
  */
 static char get_abbr(PyMOLGlobals * G, const AtomInfoType * ai) {
   const char * resn = LexStr(G, ai->resn);
@@ -159,7 +157,7 @@ int ObjectAlignmentAsStrVLA(PyMOLGlobals * G, ObjectAlignment * I, int state, in
   int max_name_len = 12;        /* default indentation */
 
   if(state < 0)
-    state = ObjectGetCurrentState(I, false);
+    state = I->getCurrentState();
   if(state < 0)
     state = SceneGetState(G);
   if(state >= 0 && state < I->getNFrame()) {
@@ -292,7 +290,7 @@ int ObjectAlignmentAsStrVLA(PyMOLGlobals * G, ObjectAlignment * I, int state, in
               int a;
               for(a = 0; a < nRow; a++) {
                 row = row_vla + a;
-                row->txt = pymol::calloc<char>(nCol + 1);
+                row->txt = pymol::vla<char>(nCol + 1);
                 row->len = 0;
                 row->last_ai = NULL;
                 row->cCol = 0;
@@ -449,7 +447,7 @@ int ObjectAlignmentAsStrVLA(PyMOLGlobals * G, ObjectAlignment * I, int state, in
             int a;
             for(a = 0; a < nRow; a++) {
               row = row_vla + a;
-              FreeP(row->txt);
+              row->txt.freeP();
             }
           }
           FreeP(cons_str);
@@ -484,7 +482,7 @@ static int *AlignmentMerge(PyMOLGlobals * G, int *curVLA, const int *newVLA,
 
       // get the set of non-guide objects in the new alignment, they need
       // to be flushed (removed) from the current alignment
-      std::set<const ObjectMolecule*> flushobjects;
+      std::unordered_set<const ObjectMolecule*> flushobjects;
       if (flush) {
         flushobjects.insert(flush);
       } else {
@@ -566,8 +564,8 @@ static int *AlignmentMerge(PyMOLGlobals * G, int *curVLA, const int *newVLA,
       /* now combine the alignments */
 
       {
-        OVOneToAny *used = OVOneToAny_New(G->Context->heap);
-        OVOneToAny *active = OVOneToAny_New(G->Context->heap);
+        std::unordered_set<int> used;
+        std::unordered_set<int> active;
         int cur_start = 0;
         int new_start = 0;
 
@@ -597,15 +595,15 @@ static int *AlignmentMerge(PyMOLGlobals * G, int *curVLA, const int *newVLA,
             int c, id;
             int overlapping = false;
 
-            OVOneToAny_Reset(active);
+            active.clear();
             c = cur_start;
             while((id = curVLA[c++])) { /* record active atoms */
-              OVOneToAny_SetKey(active, id, 1);
+              active.insert(id);
             }
 
             c = new_start;
             while((id = newVLA[c++])) { /* see if there are any matches */
-              if(OVreturn_IS_OK(OVOneToAny_GetKey(active, id))) {
+              if (active.find(id) != active.end()) {
                 overlapping = true;
                 break;
               }
@@ -658,12 +656,11 @@ static int *AlignmentMerge(PyMOLGlobals * G, int *curVLA, const int *newVLA,
             case -1:           /* insert new */
               if(new_start < n_new) {
                 while((id = newVLA[new_start])) {
-                  if(OVOneToAny_GetKey(used, id).status == OVstatus_NOT_FOUND) {
-                    if(OVreturn_IS_OK(OVOneToAny_SetKey(used, id, 1))) {
-                      VLACheck(result, int, n_result);
-                      result[n_result] = id;
-                      n_result++;
-                    }
+                  if (used.find(id) == used.end()) {
+                    used.insert(id);
+                    VLACheck(result, int, n_result);
+                    result[n_result] = id;
+                    n_result++;
                   }
                   new_start++;
                 }
@@ -677,12 +674,11 @@ static int *AlignmentMerge(PyMOLGlobals * G, int *curVLA, const int *newVLA,
             case 0:            /* merge, with cur going first */
               if(new_start < n_new) {
                 while((id = newVLA[new_start])) {
-                  if(OVOneToAny_GetKey(used, id).status == OVstatus_NOT_FOUND) {
-                    if(OVreturn_IS_OK(OVOneToAny_SetKey(used, id, 1))) {
-                      VLACheck(result, int, n_result);
-                      result[n_result] = id;
-                      n_result++;
-                    }
+                  if (used.find(id) == used.end()) {
+                    used.insert(id);
+                    VLACheck(result, int, n_result);
+                    result[n_result] = id;
+                    n_result++;
                   }
                   new_start++;
                 }
@@ -691,12 +687,11 @@ static int *AlignmentMerge(PyMOLGlobals * G, int *curVLA, const int *newVLA,
               }
               if(cur_start < n_cur) {
                 while((id = curVLA[cur_start])) {
-                  if(OVOneToAny_GetKey(used, id).status == OVstatus_NOT_FOUND) {
-                    if(OVreturn_IS_OK(OVOneToAny_SetKey(used, id, 1))) {
-                      VLACheck(result, int, n_result);
-                      result[n_result] = id;
-                      n_result++;
-                    }
+                  if (used.find(id) == used.end()) {
+                    used.insert(id);
+                    VLACheck(result, int, n_result);
+                    result[n_result] = id;
+                    n_result++;
                   }
                   cur_start++;
                 }
@@ -710,12 +705,11 @@ static int *AlignmentMerge(PyMOLGlobals * G, int *curVLA, const int *newVLA,
             case 1:            /* insert cur */
               if(cur_start < n_cur) {
                 while((id = curVLA[cur_start])) {
-                  if(OVOneToAny_GetKey(used, id).status == OVstatus_NOT_FOUND) {
-                    if(OVreturn_IS_OK(OVOneToAny_SetKey(used, id, 1))) {
-                      VLACheck(result, int, n_result);
-                      result[n_result] = id;
-                      n_result++;
-                    }
+                  if (used.find(id) == used.end()) {
+                    used.insert(id);
+                    VLACheck(result, int, n_result);
+                    result[n_result] = id;
+                    n_result++;
                   }
                   cur_start++;
                 }
@@ -729,8 +723,6 @@ static int *AlignmentMerge(PyMOLGlobals * G, int *curVLA, const int *newVLA,
             }
           }
         }
-        OVOneToAny_DEL_AUTO_NULL(active);
-        OVOneToAny_DEL_AUTO_NULL(used);
       }
     }
   }
@@ -1026,9 +1018,10 @@ void ObjectAlignment::update()
     if(I->ForceState >= 0) {
       state = I->ForceState;
       I->ForceState = 0;
+    } else {
+      state = I->getCurrentState();
     }
-    if(state < 0)
-      state = SettingGet_i(I->G, NULL, I->Setting, cSetting_state) - 1;
+    // TODO do these fallbacks make any sense?
     if(state < 0)
       state = SceneGetState(G);
     if(state >= I->getNFrame())
@@ -1064,7 +1057,7 @@ void ObjectAlignment::render(RenderInfo * info)
   int state = info->state;
   CRay *ray = info->ray;
   auto pick = info->pick;
-  int pass = info->pass;
+  const RenderPass pass = info->pass;
   ObjectAlignmentState *sobj = NULL;
   const float *color;
 
@@ -1075,17 +1068,17 @@ void ObjectAlignment::render(RenderInfo * info)
   if (pick)
     return;
 
-  if(pass>0 || ray) {
+  if(pass == RenderPass::Opaque || ray) {
     if((I->visRep & cRepCGOBit)) {
 
-      for(StateIterator iter(G, I->Setting, state, I->getNFrame()); iter.next();) {
+      for(StateIterator iter(G, I->Setting.get(), state, I->getNFrame()); iter.next();) {
         sobj = I->State.data() + iter.state;
 
         if (!sobj->primitiveCGO)
           continue;
 
 	if(ray) {
-	    CGORenderRay(sobj->primitiveCGO.get(), ray, info, color, NULL, I->Setting, NULL);
+	    CGORenderRay(sobj->primitiveCGO.get(), ray, info, color, NULL, I->Setting.get(), NULL);
 	} else if(G->HaveGUI && G->ValidContext) {
 #ifndef PURE_OPENGL_ES_2
 	  if(!info->line_lighting)
@@ -1141,7 +1134,7 @@ void ObjectAlignment::render(RenderInfo * info)
           }
 
           if (cgo) {
-            CGORenderGL(cgo, color, I->Setting, NULL, info, NULL);
+            CGORender(cgo, color, I->Setting.get(), NULL, info, NULL);
           }
 
 #ifndef PURE_OPENGL_ES_2
@@ -1153,10 +1146,10 @@ void ObjectAlignment::render(RenderInfo * info)
   }
 }
 
-void ObjectAlignment::invalidate(int rep, int level, int state)
+void ObjectAlignment::invalidate(cRep_t rep, cRepInv_t level, int state)
 {
   if((rep == cRepAll) || (rep == cRepCGO)) {
-    for(StateIterator iter(G, Setting, state, getNFrame()); iter.next();) {
+    for(StateIterator iter(G, Setting.get(), state, getNFrame()); iter.next();) {
       ObjectAlignmentState& sobj = State[iter.state];
       sobj.valid = false;
       sobj.renderCGO.reset();
@@ -1166,7 +1159,7 @@ void ObjectAlignment::invalidate(int rep, int level, int state)
 
 
 /*========================================================================*/
-ObjectAlignment::ObjectAlignment(PyMOLGlobals * G) : CObject(G)
+ObjectAlignment::ObjectAlignment(PyMOLGlobals * G) : pymol::CObject(G)
 {
   type = cObjectAlignment;
 }
@@ -1222,4 +1215,9 @@ ObjectAlignment *ObjectAlignmentDefine(PyMOLGlobals * G,
   SceneChanged(G);
   SceneCountFrames(G);
   return (I);
+}
+
+pymol::CObject* ObjectAlignment::clone() const
+{
+  return new ObjectAlignment(*this);
 }

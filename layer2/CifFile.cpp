@@ -268,12 +268,20 @@ bool cif_file::parse(char*&& p) {
       if (*p)
         *(p++) = 0;
       prev = *p;
-    } else if (*p == ';' && islinefeed(prev)) { // will NULL the line feed before the closing semicolon
+    } else if (*p == ';' && islinefeed(prev)) {
+      // multi-line tokens start with ";" and end with "\n;"
+      // multi-line tokens cannot be keys, only values.
       keypossible.push_back(false);
       tokens.push_back(p + 1);
+      // advance until `\n;`
       while (*++p && !(islinefeed(*p) && p[1] == ';'));
+      // step to next line and null the line feed
       if (*p) {
         *p = 0;
+        // \r\n on Windows)
+        if (p - 1 > tokens.back() && *(p - 1) == '\r') {
+          *(p - 1) = 0;
+        }
         p += 2;
       }
       prev = ';';
@@ -297,6 +305,7 @@ bool cif_file::parse(char*&& p) {
   cif_data* current_frame = nullptr;
   std::vector<cif_data*> frame_stack;
   std::unique_ptr<cif_data> global_block;
+  decltype(m_datablocks) datablocksnew;
 
   // parse into dictionary
   for (unsigned int i = 0, n = tokens.size(); i < n; i++) {
@@ -367,8 +376,8 @@ bool cif_file::parse(char*&& p) {
       i--;
 
     } else if (strncasecmp("data_", tokens[i], 5) == 0) {
-      m_datablocks.emplace_back();
-      current_frame = &m_datablocks.back();
+      datablocksnew.emplace_back();
+      current_frame = &datablocksnew.back();
       current_frame->m_code = tokens[i] + 5;
       frame_stack = {current_frame};
 
@@ -404,6 +413,8 @@ bool cif_file::parse(char*&& p) {
       return false;
     }
   }
+
+  m_datablocks = std::move(datablocksnew);
 
   return true;
 }

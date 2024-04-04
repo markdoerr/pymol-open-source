@@ -135,21 +135,6 @@ void TextAdvance(PyMOLGlobals * G, float advance)
   G->Text->Pos[0] += advance;
 }
 
-void TextSetLabPos(PyMOLGlobals * G, const float *pos, const LabPosType * labpos, const char *text)
-{
-  if((!labpos) || (!labpos->mode))
-    TextSetPos(G, pos);
-  else {
-    CText *I = G->Text;
-    switch (labpos->mode) {
-    default:
-      copy3f(pos, I->Pos);
-      add3f(labpos->offset, I->Pos, I->Pos);
-      break;
-    }
-  }
-}
-
 void TextIndent(PyMOLGlobals * G, float x, float y)
 {
   CText *I = G->Text;
@@ -227,26 +212,26 @@ float *TextGetTargetPos(PyMOLGlobals * G){
   return I->TargetPos;
 }
 
-void TextDrawSubStrFast(PyMOLGlobals * G, const char *c, int x, int y, int start, int n ORTHOCGOARG)
+void TextDrawSubStrFast(PyMOLGlobals * G, const char *c, int x, int y, int start, int n , CGO *orthoCGO)
 {
   c += start;
   TextSetPos2i(G, x, y);
   if(n)
     while(*c) {
       n--;
-      TextDrawChar(G, *(c++) ORTHOCGOARGVAR);
+      TextDrawChar(G, *(c++), orthoCGO);
       if(n <= 0)
         break;
     }
 }
 
-void TextDrawCharRepeat(PyMOLGlobals * G, char c, int x, int y, int start, int n ORTHOCGOARG)
+void TextDrawCharRepeat(PyMOLGlobals * G, char c, int x, int y, int start, int n , CGO *orthoCGO)
 {
   c += start;
   TextSetPos2i(G, x, y);
   while(n) {
     n--;
-    TextDrawChar(G, c ORTHOCGOARGVAR);
+    TextDrawChar(G, c, orthoCGO);
   }
 }
 
@@ -389,8 +374,8 @@ void TextGetOutlineColor(PyMOLGlobals * G,
   *alpha = I->OutlineColor[3];
 }
 
-const char *TextRenderOpenGL(PyMOLGlobals * G, RenderInfo * info, int text_id,
-    const char *st, float size, float *rpos,
+const char *TextRenderOpenGL(PyMOLGlobals * G, const RenderInfo * info, int text_id,
+    const char *st, float size, const float *rpos,
     short needSize, short relativeMode, short shouldRender,
     CGO *shaderCGO)
 {
@@ -415,29 +400,29 @@ const char *TextRenderOpenGL(PyMOLGlobals * G, RenderInfo * info, int text_id,
   return st;
 }
 
-void TextDrawStrAt(PyMOLGlobals * G, const char *st, int x, int y ORTHOCGOARG)
+void TextDrawStrAt(PyMOLGlobals * G, const char *st, int x, int y , CGO *orthoCGO)
 {
   CText *I = G->Text;
   TextSetPos3f(G, (float) x, (float) y, 0.0F);
-  TextRenderOpenGL(G, NULL, I->Default_ID, st, TEXT_DEFAULT_SIZE, NULL, false, 0, 1 ORTHOCGOARGVAR);
+  TextRenderOpenGL(G, NULL, I->Default_ID, st, TEXT_DEFAULT_SIZE, NULL, false, 0, 1, orthoCGO);
 }
 
-void TextDrawStr(PyMOLGlobals * G, const char *st ORTHOCGOARG)
+void TextDrawStr(PyMOLGlobals * G, const char *st , CGO *orthoCGO)
 {
   CText *I = G->Text;
-  TextRenderOpenGL(G, NULL, I->Default_ID, st, TEXT_DEFAULT_SIZE, NULL, false, 0, 1 ORTHOCGOARGVAR);
+  TextRenderOpenGL(G, NULL, I->Default_ID, st, TEXT_DEFAULT_SIZE, NULL, false, 0, 1, orthoCGO);
 }
 
-void TextDrawChar(PyMOLGlobals * G, char ch ORTHOCGOARG)
+void TextDrawChar(PyMOLGlobals * G, char ch , CGO *orthoCGO)
 {
   char st[2] = { 0, 0 };
   CText *I = G->Text;
   st[0] = ch;
-  TextRenderOpenGL(G, NULL, I->Default_ID, st, TEXT_DEFAULT_SIZE, NULL, false, 0, 1 ORTHOCGOARGVAR);
+  TextRenderOpenGL(G, NULL, I->Default_ID, st, TEXT_DEFAULT_SIZE, NULL, false, 0, 1, orthoCGO);
 }
 
 const char *TextRenderRay(PyMOLGlobals * G, CRay * ray, int text_id,
-    const char *st, float size, float *rpos, short needSize, short relativeMode)
+    const char *st, float size, const float *rpos, short needSize, short relativeMode)
 {
   CText *I = G->Text;
 
@@ -512,7 +497,7 @@ float *TextGetLabelBuffer(PyMOLGlobals * G)
   return I->LabelBuf;
 }
 
-/*
+/**
  * GUI elements like internal menus or the wizard prompt can handle text
  * color markup in the form "\\RGB" where RGB are three digits (0-9) or
  * "---" to reset the color.
@@ -535,7 +520,7 @@ bool TextStartsWithColorCode(const char *p)
       ('0' <= p[3] && p[3] <= '9'));
 }
 
-/*
+/**
  * Set text color from "\\RGB" code.
  *
  * "\\---" -> defaultcolor

@@ -12,9 +12,6 @@
 #-*
 #Z* -------------------------------------------------------------------
 
-from __future__ import print_function
-
-import string
 import re
 import copy
 
@@ -23,8 +20,8 @@ from chempy import io
 class SDFRec:
 
     def __init__(self,sdflist):
-        getkee = re.compile("^>\s+<([^>]*)>")
-        gettag = re.compile("^>\s+<[^>]*>\s+\((.*)\)")
+        getkee = re.compile(r"^>\s+<([^>]*)>")
+        gettag = re.compile(r"^>\s+<[^>]*>\s+\((.*)\)")
         ll = len(sdflist)
         if ll<4:
             print(" SDFRec: invalid SDF record format #1")
@@ -66,7 +63,7 @@ class SDFRec:
                 sd = self.data[kee]
                 l = l + 1
                 while l<ll:
-                    if len(string.strip(sdflist[l]))!=0:
+                    if sdflist[l].strip():
                         sd.append(sdflist[l])
                         l = l + 1
                     else:
@@ -98,7 +95,7 @@ class SDFRec:
         if kee in self.data:
             sdk = self.data[kee]
             if len(sdk):
-                return string.strip(sdk[0])
+                return sdk[0].strip()
             else:
                 return None
         else:
@@ -142,12 +139,9 @@ class SDF:
             return None
         if mode=='pf': # pseudofile
             self.file = fname
-        elif (mode[0:1]=='r') and (string.find(fname,':')>1):
+        elif mode[0:1] == 'r' and '://' in fname:
             # does this look like a URL? (but not a DOS path)
-            try:
-                from urllib import urlopen
-            except ImportError:
-                from urllib.request import urlopen
+            from urllib.request import urlopen
             self.file = urlopen(fname)
         else:
             self.file = open(fname,mode)

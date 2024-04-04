@@ -6,10 +6,14 @@
 
 #include <string>
 
-#include "os_std.h"
+struct PyMOLGlobals;
+class SeleCoordIterator;
+struct AtomInfoType;
 
-#include "AtomInfo.h"
-#include "AtomIterators.h"
+namespace pymol
+{
+    struct CObject;
+}
 
 int MaeExportGetAtomStyle(PyMOLGlobals * G,
     const SeleCoordIterator& iter);
@@ -28,8 +32,7 @@ void MaeExportGetRibbonColor(PyMOLGlobals * G,
 std::string MaeExportGetLabelUserText(PyMOLGlobals * G,
     const AtomInfoType * ai);
 
-std::string MaeExportGetSubGroupId(PyMOLGlobals * G,
-    const CObject * obj);
+std::string MaeExportGetSubGroupId(PyMOLGlobals* G, const pymol::CObject* obj);
 
 std::string MaeExportStrRepr(const char * text);
 

@@ -53,6 +53,7 @@ Z* -------------------------------------------------------------------
 #include "CGO.h"
 #include "MyPNG.h"
 #include "File.h"
+#include "Feedback.h"
 
 #ifdef _PYMOL_OPENVR
 #include "OpenVRMode.h"
@@ -102,13 +103,13 @@ public:
   int cmdActiveBusy{};
   std::queue<std::string> feedback;
   int Pushed{};
-  std::vector<std::unique_ptr<CDeferred>> deferred; //Ortho manages DeferredObjs
-  int RenderMode{};
-  GLint ViewPort[4]{};
+  std::vector<std::function<void()>> deferred; //Ortho manages DeferredObjs
+  OrthoRenderMode RenderMode = OrthoRenderMode::Main;
+  Rect2D Viewport;
   int WrapXFlag{};
   GLenum ActiveGLBuffer{};
   double DrawTime{}, LastDraw{};
-  int WrapClickSide{};            /* ugly kludge for finding click side in geowall stereo mode */
+  ClickSide WrapClickSide = ClickSide::None;            /* ugly kludge for finding click side in geowall stereo mode */
 
   /* packing information */
   int WizardHeight{};
@@ -182,31 +183,31 @@ void OrthoParseCurrentLine(PyMOLGlobals * G);
 #define cWizardLeftMargin 15
 #define cWizardBorder 7
 
-static int get_wrap_x(int x, int *last_x, int width, int *click_side)
+static int get_wrap_x(int x, int *last_x, int width, ClickSide* click_side)
 {
   int width_2 = width / 2;
   int width_3 = width / 3;
   if(!last_x) {
     if(x > width_2) {
       x -= width_2;
-      if(click_side)
-        *click_side = 1;
+      if (click_side)
+        *click_side = ClickSide::Right;
     } else {
-      if(click_side)
-        *click_side = -1;
+      if (click_side)
+        *click_side = ClickSide::Left;
     }
   } else {
     if((x - (*last_x)) > width_3) {
       x -= width_2;
-      if(click_side)
-        *click_side = 1;
+      if (click_side)
+        *click_side = ClickSide::Right;
     } else if(((*last_x) - x) > width_3) {
       x += width_2;
-      if(click_side)
-        *click_side = 1;
+      if (click_side)
+        *click_side = ClickSide::Right;
     } else {
-      if(click_side)
-        *click_side = -1;
+      if (click_side)
+        *click_side = ClickSide::Left;
     }
   }
   return x;
@@ -234,10 +235,9 @@ int OrthoGetDirty(PyMOLGlobals * G)
   return I->DirtyFlag;
 }
 
-int OrthoGetRenderMode(PyMOLGlobals * G)
+OrthoRenderMode OrthoGetRenderMode(PyMOLGlobals * G)
 {
-  COrtho *I = G->Ortho;
-  return I->RenderMode;
+  return G->Ortho->RenderMode;
 }
 
 void OrthoSetLoopRect(PyMOLGlobals * G, int flag, BlockRect * rect)
@@ -260,13 +260,13 @@ void OrthoExecDeferred(PyMOLGlobals * G)
   COrtho *I = G->Ortho;
   /* execute all deferred actions that happened to require a
    * valid OpenGL context (such as atom picks, etc.) */
-  for(const auto& d : I->deferred){
-    d->exec();
+  for (const auto& d : I->deferred) {
+    d();
   }
   I->deferred.clear();
 }
 
-void OrthoDefer(PyMOLGlobals * G, std::unique_ptr<CDeferred> && D)
+void OrthoDefer(PyMOLGlobals * G, std::function<void()>&& D)
 {
   COrtho *I = G->Ortho;
   I->deferred.emplace_back(std::move(D));
@@ -1310,120 +1310,146 @@ void OrthoBackgroundTextureNeedsUpdate(PyMOLGlobals * G){
   I->bg_texture_needs_update = 1;
 }
 
+/**
+ * Make a background image for grid mode.
+ *
+ * Repurpose the `bg_rgb_top` and `bg_rgb_bottom` colors to color grid cells
+ * with alternating colors.
+ */
+static std::unique_ptr<pymol::Image> makeBgGridImage(PyMOLGlobals* G)
+{
+  auto const& grid = G->Scene->grid;
+  auto tmpImg = pymol::make_unique<pymol::Image>( //
+      grid.n_col > 1 ? grid.n_col : 1,            //
+      grid.n_row > 1 ? grid.n_row : 1);
+
+  unsigned char top[4]{0, 0, 0, 0xFF}, bottom[4]{0, 0, 0, 0xFF};
+  pymol::scale3(ColorGet(G, SettingGet_color(G, cSetting_bg_rgb_top)), 0xFF, top);
+  pymol::scale3(ColorGet(G, SettingGet_color(G, cSetting_bg_rgb_bottom)), 0xFF, bottom);
+
+  unsigned char* q = tmpImg->bits();
+
+  for (unsigned j = 0; j != tmpImg->getHeight(); ++j) {
+    for (unsigned i = 0; i != tmpImg->getWidth(); ++i, q += 4) {
+      auto color = (i + j) % 2 ? top : bottom;
+      copy4(color, q);
+    }
+  }
+
+  return tmpImg;
+}
+
+static std::unique_ptr<pymol::Image> makeBgGradientImage(PyMOLGlobals* G)
+{
+  constexpr unsigned height = BACKGROUND_TEXTURE_SIZE;
+
+  auto tmpImg = pymol::make_unique<pymol::Image>(1, height);
+
+  float top[3], bottom[3], mixed[4]{0, 0, 0, 1};
+  copy3f(ColorGet(G, SettingGet_color(G, cSetting_bg_rgb_top)), top);
+  copy3f(ColorGet(G, SettingGet_color(G, cSetting_bg_rgb_bottom)), bottom);
+
+  unsigned char* q = tmpImg->bits();
+
+  for (unsigned b = 0; b != height; ++b) {
+    mix3f(bottom, top, b / float(height - 1), mixed);
+
+    for (unsigned i = 0; i != 4; ++i) {
+      *(q++) = static_cast<unsigned char>(mixed[i] * 0xFF + 0.5);
+    }
+  }
+
+  return tmpImg;
+}
+
+static CGO* makeBgCGO(PyMOLGlobals* G)
+{
+  constexpr float z_value = 0.98f;
+  CGO primCgo(G);
+
+  bool ok =                                    //
+      CGOBegin(&primCgo, GL_TRIANGLE_STRIP) && //
+      CGOVertex(&primCgo, -1, -1, z_value) &&  //
+      CGOVertex(&primCgo, 1, -1, z_value) &&   //
+      CGOVertex(&primCgo, -1, 1, z_value) &&   //
+      CGOVertex(&primCgo, 1, 1, z_value) &&    //
+      CGOEnd(&primCgo);
+
+  if (!ok) {
+    return nullptr;
+  }
+
+  assert(primCgo.has_begin_end);
+
+  std::unique_ptr<CGO> bgCgo(CGOOptimizeToVBONotIndexed(&primCgo));
+
+  CGOChangeShadersTo(
+      bgCgo.get(), GL_DEFAULT_SHADER_WITH_SETTINGS, GL_BACKGROUND_SHADER);
+
+  assert(bgCgo->use_shader);
+
+  return bgCgo.release();
+}
+
+static void updateBgTexture(
+    PyMOLGlobals* G, pymol::Image const& bgImage, GLuint const bg_texture_id)
+{
+  glActiveTexture(GL_TEXTURE4);
+  glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+  glBindTexture(GL_TEXTURE_2D, bg_texture_id);
+
+  auto const bg_image_mode = SettingGet<int>(G, cSetting_bg_image_mode);
+  bool const is_repeat = bg_image_mode > 1;
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, is_repeat ? GL_REPEAT : GL_CLAMP_TO_EDGE);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, is_repeat ? GL_REPEAT : GL_CLAMP_TO_EDGE);
+
+  auto const bg_image_linear = SettingGet<bool>(G, cSetting_bg_image_linear);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, bg_image_linear ? GL_LINEAR : GL_NEAREST);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, bg_image_linear ? GL_LINEAR : GL_NEAREST);
+
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, bgImage.getWidth(),
+      bgImage.getHeight(), 0, GL_RGBA, GL_UNSIGNED_BYTE,
+      (GLvoid*) bgImage.bits());
+}
+
 void bg_grad(PyMOLGlobals * G) {
   COrtho *I = G->Ortho;    
-  float top[3];
-  float bottom[3];
-  int bg_gradient = SettingGet_b(G, NULL, NULL, cSetting_bg_gradient);
-  int bg_image_mode = SettingGet_b(G, NULL, NULL, cSetting_bg_image_mode);
+  auto bg_gradient = SettingGet<BgGradient>(G, cSetting_bg_gradient);
   const char * bg_image_filename = SettingGetGlobal_s(G, cSetting_bg_image_filename);
-  short bg_image = bg_image_filename && bg_image_filename[0];
-  short bg_is_solid = 0;
-  short is_repeat = bg_gradient ? 0 : 1;
-  int ok = true;
-  copy3f(ColorGet(G, SettingGet_color(G, NULL, NULL, cSetting_bg_rgb_top)), top);
-  copy3f(ColorGet(G, SettingGet_color(G, NULL, NULL, cSetting_bg_rgb_bottom)), bottom);
 
-  if (!bg_gradient && !bg_image && !I->bgData){
+  if (bg_image_filename && !bg_image_filename[0]) {
+    bg_image_filename = nullptr;
+  }
+
+  if (bg_gradient == BgGradient::Grid &&
+      SettingGet<GridMode>(G, cSetting_grid_mode) == GridMode::NoGrid) {
+    bg_gradient = BgGradient::None;
+  }
+
+  if (!(bg_gradient != BgGradient::None || bg_image_filename || I->bgData) ||
+      !G->ShaderMgr->ShadersPresent()) {
     const float *bg_rgb = ColorGet(G, SettingGet_color(G, NULL, NULL, cSetting_bg_rgb));
     SceneGLClearColor(bg_rgb[0], bg_rgb[1], bg_rgb[2], 1.0);
     glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
-      return;
-  }
-
-  if (!G->ShaderMgr->ShadersPresent()){
-    float zero[3] = { 0.f, 0.f, 0.f } ;
-    const float *bg_rgb = ColorGet(G, SettingGet_color(G, NULL, NULL, cSetting_bg_rgb));
-    bg_is_solid = !equal3f(bg_rgb, zero);
-      SceneGLClearColor(bg_rgb[0], bg_rgb[1], bg_rgb[2], 1.0);
-      glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
     return;
-    }
-  if (bg_image || I->bgData){
-    is_repeat = (bg_image_mode==0 || bg_image_mode==1) ? 0 : 1;
   }
 
-  glDisable(GL_DEPTH_TEST);
+  if (!I->bgCGO) {
+    I->bgCGO = makeBgCGO(G);
+    assert(I->bgCGO);
+  }
 
-  {
-    if (!I->bgCGO) {
-      CGO *cgo = CGONew(G), *cgo2 = NULL;
-      ok &= CGOBegin(cgo, GL_TRIANGLE_STRIP);
-      if (ok)
-	ok &= CGOVertex(cgo, -1.f, -1.f, 0.98f);
-      if (ok)
-	ok &= CGOVertex(cgo, 1.f, -1.f, 0.98f);
-      if (ok)
-	ok &= CGOVertex(cgo, -1.f, 1.f, 0.98f);
-      if (ok)
-	ok &= CGOVertex(cgo, 1.f, 1.f, 0.98f);
-      if (ok)
-	ok &= CGOEnd(cgo);
-      if (ok)
-	ok &= CGOStop(cgo);
-      if (ok)
-	cgo2 = CGOCombineBeginEnd(cgo, 0);
-      CHECKOK(ok, cgo2);
-      CGOFree(cgo);
-      if (ok)
-	I->bgCGO = CGOOptimizeToVBONotIndexed(cgo2, 0);
-      if (ok){
-	CGOChangeShadersTo(I->bgCGO, GL_DEFAULT_SHADER_WITH_SETTINGS, GL_BACKGROUND_SHADER);
-	I->bgCGO->use_shader = true;
-      } else {
-	CGOFree(I->bgCGO);
-      }
-      CGOFree(cgo2);
-    }
-    if (ok && !bg_is_solid && (I->bgData && (!I->bg_texture_id || I->bg_texture_needs_update))){
-      short is_new = !I->bg_texture_id;
-      if (is_new){
-	glGenTextures(1, &I->bg_texture_id);
-      }
-      glActiveTexture(GL_TEXTURE4);
-      glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-      glBindTexture(GL_TEXTURE_2D, I->bg_texture_id);
-      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, is_repeat ? GL_REPEAT : GL_CLAMP_TO_EDGE);
-      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, is_repeat ? GL_REPEAT : GL_CLAMP_TO_EDGE);
-      {
-	int bg_image_linear = SettingGet_b(G, NULL, NULL, cSetting_bg_image_linear);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, bg_image_linear ? GL_LINEAR : GL_NEAREST);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, bg_image_linear ? GL_LINEAR : GL_NEAREST);
-      }
-      glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
-		   I->bgData->getWidth(), I->bgData->getHeight(), 0, GL_RGBA, GL_UNSIGNED_BYTE, (GLvoid*)I->bgData->bits());
+  if (!I->bg_texture_id || I->bg_texture_needs_update) {
+    std::shared_ptr<const pymol::Image> bgImage = I->bgData;
 
-      bg_image = false;
-      bg_gradient = I->bg_texture_needs_update = 0;
-    }
-
-    if (ok && !bg_is_solid && (bg_image && (!I->bg_texture_id || I->bg_texture_needs_update))){
+    if (bgImage) {
+      // pass
+    } else if (bg_image_filename){
       // checking to see if bg_image_filename can be loaded into texture
-      auto bgImage = MyPNGRead(bg_image_filename);
+      bgImage = MyPNGRead(bg_image_filename);
       if(bgImage) {
         I->bgWidth = bgImage->getWidth();
         I->bgHeight = bgImage->getHeight();
-
-	short is_new = !I->bg_texture_id;
-	if (is_new){
-	  glGenTextures(1, &I->bg_texture_id);
-	}
-
-	glActiveTexture(GL_TEXTURE4);
-	glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-	glBindTexture(GL_TEXTURE_2D, I->bg_texture_id);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, is_repeat ? GL_REPEAT : GL_CLAMP_TO_EDGE);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, is_repeat ? GL_REPEAT : GL_CLAMP_TO_EDGE);
-	{
-	  int bg_image_linear = SettingGet_b(G, NULL, NULL, cSetting_bg_image_linear);
-	  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, bg_image_linear ? GL_LINEAR : GL_NEAREST);
-	  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, bg_image_linear ? GL_LINEAR : GL_NEAREST);
-	}
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, bgImage->getWidth(),
-            bgImage->getHeight(), 0, GL_RGBA, GL_UNSIGNED_BYTE,
-            (GLvoid*) bgImage->bits());
-        bgImage.reset();
-      bg_gradient = I->bg_texture_needs_update = 0;
       } else {
 	PRINTFB(G, FB_Ortho, FB_Errors)
 	  "Ortho: bg_grad: bg_image_filename='%s' cannot be loaded, unset\n", bg_image_filename
@@ -1431,63 +1457,29 @@ void bg_grad(PyMOLGlobals * G) {
 	SettingSetGlobal_s(G, cSetting_bg_image_filename, "");
 	G->ShaderMgr->Reload_All_Shaders();
       }
-      bgImage = nullptr;
+    } else if (bg_gradient == BgGradient::Grid) {
+      bgImage = makeBgGridImage(G);
+    } else if (bg_gradient == BgGradient::Vertical) {
+      bgImage = makeBgGradientImage(G);
     }
 
-    if (ok && !bg_is_solid && bg_gradient && (!I->bg_texture_id || I->bg_texture_needs_update)){
-      short is_new = !I->bg_texture_id;
-      int tex_dim = BACKGROUND_TEXTURE_SIZE;
-      pymol::Image tmpImg(tex_dim, tex_dim);
-      I->bg_texture_needs_update = 0;
-      if (is_new){
+    if (bgImage) {
+      if (!I->bg_texture_id) {
 	glGenTextures(1, &I->bg_texture_id);
       }
-      glActiveTexture(GL_TEXTURE4);
-      glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-      glBindTexture(GL_TEXTURE_2D, I->bg_texture_id);
-      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, is_repeat ? GL_REPEAT : GL_CLAMP_TO_EDGE);
-      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, is_repeat ? GL_REPEAT : GL_CLAMP_TO_EDGE);
-      {
-	int bg_image_linear = SettingGet_b(G, NULL, NULL, cSetting_bg_image_linear);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, bg_image_linear ? GL_LINEAR : GL_NEAREST);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, bg_image_linear ? GL_LINEAR : GL_NEAREST);
-      }
 
-      {
-	int a, b;
-	unsigned char *q, val[4];
-	float bot[3] = { bottom[0]*255, bottom[1]*255, bottom[2]*255 };
-	float tmpb, diff[3] = { 255.f*(top[0] - bottom[0]), 
-				255.f*(top[1] - bottom[1]), 
-				255.f*(top[2] - bottom[2]) };
-          
-	for(b = 0; b < BACKGROUND_TEXTURE_SIZE; b++) {
-	  tmpb = b / (BACKGROUND_TEXTURE_SIZE-1.f);
-	  val[0] = (unsigned char)pymol_roundf(bot[0] + tmpb*diff[0]) ;
-	  val[1] = (unsigned char)pymol_roundf(bot[1] + tmpb*diff[1]) ;
-	  val[2] = (unsigned char)pymol_roundf(bot[2] + tmpb*diff[2]) ;
-	  for(a = 0; a < BACKGROUND_TEXTURE_SIZE; a++) {
-	    q = tmpImg.bits() + (4 * BACKGROUND_TEXTURE_SIZE * b) + 4 * a;
-	    *(q++) = val[0];
-	    *(q++) = val[1];
-	    *(q++) = val[2];
-	    *(q++) = 255;
-	  }
-	}
-      }
-      glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
-		   tex_dim, tex_dim, 0, GL_RGBA, GL_UNSIGNED_BYTE, (GLvoid*)tmpImg.bits());
-    }
-    if (ok && I->bgCGO) {
-       	CGORenderGL(I->bgCGO, NULL, NULL, NULL, NULL, NULL);
-	glEnable(GL_DEPTH_TEST);
+      updateBgTexture(G, *bgImage, I->bg_texture_id);
+
+      I->bg_texture_needs_update = false;
     }
   }
 
+  glDisable(GL_DEPTH_TEST);
+  CGORender(I->bgCGO, NULL, NULL, NULL, NULL, NULL);
   glEnable(GL_DEPTH_TEST);
 }
 
-void OrthoDoDraw(PyMOLGlobals * G, int render_mode)
+void OrthoDoDraw(PyMOLGlobals * G, OrthoRenderMode render_mode)
 {
   COrtho *I = G->Ortho;
   CGO *orthoCGO = NULL;
@@ -1504,7 +1496,7 @@ void OrthoDoDraw(PyMOLGlobals * G, int render_mode)
   const float *bg_color;
   int skip_prompt = 0;
   int render = false;
-  int internal_gui_mode = SettingGetGlobal_i(G, cSetting_internal_gui_mode);
+  auto internal_gui_mode = SettingGet<InternalGUIMode>(cSetting_internal_gui_mode, G->Setting);
 #ifdef _PYMOL_OPENVR
   bool offscreen_vr = false;
   int openvr_text = 0;
@@ -1551,8 +1543,8 @@ void OrthoDoDraw(PyMOLGlobals * G, int render_mode)
       PyMOLCheckOpenGLErr("OrthoDoDraw checkpoint 0");
 
     if(SettingGetGlobal_b(G, cSetting_internal_gui)) {
-      switch (SettingGetGlobal_i(G, cSetting_internal_gui_mode)) {
-      case 0:
+      switch (internal_gui_mode) {
+      case InternalGUIMode::Default:
         rightSceneMargin = DIP2PIXEL(SettingGetGlobal_i(G, cSetting_internal_gui_width));
         break;
       default:
@@ -1587,11 +1579,11 @@ void OrthoDoDraw(PyMOLGlobals * G, int render_mode)
     if(text)
       overlay = 0;
 
-    if(overlay || (!text) || render_mode < 0)
+    if(overlay || (!text) || render_mode == OrthoRenderMode::VR)
       if(!SceneRenderCached(G))
         render = true;
 
-    if(render_mode < 0) {
+    if(render_mode == OrthoRenderMode::VR) {
 #ifdef _PYMOL_OPENVR
       times = 2;
       double_pump = false;
@@ -1600,7 +1592,7 @@ void OrthoDoDraw(PyMOLGlobals * G, int render_mode)
       SceneGLClear(G, GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
       openvr_text = SettingGetGlobal_i(G, cSetting_openvr_gui_text);
 #endif
-    } else if(render_mode < 2) {
+    } else if(render_mode != OrthoRenderMode::GeoWallRight) {
       if(SceneMustDrawBoth(G)) {
         OrthoDrawBuffer(G, GL_BACK_LEFT);
         SceneGLClear(G, GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
@@ -1624,9 +1616,11 @@ void OrthoDoDraw(PyMOLGlobals * G, int render_mode)
     I->DrawTime += I->LastDraw;
     ButModeSetRate(G, (float) I->DrawTime);
 
-    if(render && (render_mode < 2))
-      SceneRender(G, NULL, 0, 0, NULL, 0, 0, 0,
-                  SettingGetGlobal_b(G, cSetting_image_copy_always));
+    if (render && (render_mode != OrthoRenderMode::GeoWallRight)) {
+      SceneRenderInfo renderInfo{};
+      renderInfo.forceCopy = SettingGet<bool>(G, cSetting_image_copy_always);
+      SceneRender(G, renderInfo);
+    }
     else if (text){
       bg_grad(G);  // only render the background for text
     }
@@ -1663,8 +1657,7 @@ void OrthoDoDraw(PyMOLGlobals * G, int render_mode)
       OrthoPushMatrix(G);
 
       if (G->ShaderMgr->ShadersPresent()){
-	if(SettingGetGlobal_b(G, cSetting_internal_gui) && 
-	   SettingGetGlobal_b(G, cSetting_use_shaders)){
+        if (SettingGet<bool>(G, cSetting_use_shaders)) {
 	  CGO *orthoFastCGO = CGONew(G);
           CGOFree(I->orthoFastCGO);
 	  if (G->Ortho->fastDraw(orthoFastCGO)){
@@ -1703,7 +1696,7 @@ void OrthoDoDraw(PyMOLGlobals * G, int render_mode)
         Block *block = SceneGetBlock(G);
         height = block->rect.bottom;
         switch (internal_gui_mode) {
-        case 0:
+        case InternalGUIMode::Default:
 	  if (generate_shader_cgo){
 	    CGOColor(orthoCGO, 0.f, 0.f, 0.f);
 	    CGOBegin(orthoCGO, GL_TRIANGLE_STRIP);
@@ -1722,7 +1715,7 @@ void OrthoDoDraw(PyMOLGlobals * G, int render_mode)
 	    glEnd();
 	  }
           /* deliberate fall-through */
-        case 1:
+        case InternalGUIMode::BG:
 	  if (generate_shader_cgo){
 	    CGOColor(orthoCGO, 0.3f, 0.3f, 0.3f);
 	    CGOBegin(orthoCGO, GL_TRIANGLE_STRIP);
@@ -1747,7 +1740,7 @@ void OrthoDoDraw(PyMOLGlobals * G, int render_mode)
 
       if(SettingGetGlobal_b(G, cSetting_internal_gui)) {
         int internal_gui_width = DIP2PIXEL(SettingGetGlobal_i(G, cSetting_internal_gui_width));
-        if(internal_gui_mode != 2) {
+        if(internal_gui_mode != InternalGUIMode::Transparent) {
 	  if (generate_shader_cgo){
 	    CGOColor(orthoCGO, 0.3f, 0.3f, 0.3f);
 	    CGOBegin(orthoCGO, GL_TRIANGLE_STRIP);
@@ -1798,7 +1791,7 @@ void OrthoDoDraw(PyMOLGlobals * G, int render_mode)
           if(lcount == adjust_at)
             y += 4;
           str = I->Line[l & OrthoSaveLines];
-          if(internal_gui_mode) {
+          if(internal_gui_mode != InternalGUIMode::Default) {
             TextSetColor(G, I->OverlayColor);
           } else if(strncmp(str, I->Prompt, 6) == 0) {
             if(lcount < adjust_at)
@@ -1813,13 +1806,13 @@ void OrthoDoDraw(PyMOLGlobals * G, int render_mode)
             TextSetColor(G, I->OverlayColor);
           TextSetPos2i(G, x, y);
           if(str) {
-            TextDrawStr(G, str ORTHOCGOARGVAR);
+            TextDrawStr(G, str, orthoCGO);
             if((lcount == 1) && (I->InputFlag)) {
               if(!skip_prompt) {
                 if(I->CursorChar >= 0) {
                   TextSetPos2i(G, x + cOrthoCharWidth * I->CursorChar, y);
                 }
-                TextDrawChar(G, '_' ORTHOCGOARGVAR);
+                TextDrawChar(G, '_', orthoCGO);
               }
             }
           }
@@ -1828,7 +1821,7 @@ void OrthoDoDraw(PyMOLGlobals * G, int render_mode)
         }
       }
 
-      OrthoDrawWizardPrompt(G ORTHOCGOARGVAR);
+      OrthoDrawWizardPrompt(G, orthoCGO);
 
       if(draw_text || I->SplashFlag) {
         Block *block;
@@ -1889,7 +1882,7 @@ void OrthoDoDraw(PyMOLGlobals * G, int render_mode)
 
       /* BEGIN PROPRIETARY CODE SEGMENT (see disclaimer in "os_proprietary.h") */
 #ifdef PYMOL_EVAL
-      OrthoDrawEvalMessage(G ORTHOCGOARGVAR);
+      OrthoDrawEvalMessage(G, orthoCGO);
 #endif
 #ifdef PYMOL_BETA
       OrthoDrawBetaMessage(G);
@@ -2006,16 +1999,16 @@ void OrthoRenderCGO(PyMOLGlobals * G){
     glDisable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
     if (I->orthoCGO)
-      CGORenderGL(I->orthoCGO, NULL, NULL, NULL, NULL, NULL);
+      CGORender(I->orthoCGO, NULL, NULL, NULL, NULL, NULL);
     if (I->orthoFastCGO)
-      CGORenderGL(I->orthoFastCGO, NULL, NULL, NULL, NULL, NULL);
+      CGORender(I->orthoFastCGO, NULL, NULL, NULL, NULL, NULL);
     G->ShaderMgr->Disable_Current_Shader();
     glEnable(GL_DEPTH_TEST);
   }
 }
 /*========================================================================*/
 
-void OrthoDrawWizardPrompt(PyMOLGlobals * G ORTHOCGOARG)
+void OrthoDrawWizardPrompt(PyMOLGlobals * G , CGO *orthoCGO)
 {
   /* assumes PMGUI */
 
@@ -2028,14 +2021,14 @@ void OrthoDrawWizardPrompt(PyMOLGlobals * G ORTHOCGOARG)
   int maxLen;
   BlockRect rect;
   int prompt_mode = SettingGetGlobal_i(G, cSetting_wizard_prompt_mode);
-  int gui_mode = SettingGetGlobal_b(G, cSetting_internal_gui_mode);
+  auto gui_mode = SettingGet<InternalGUIMode>(cSetting_internal_gui_mode, G->Setting);
   float *text_color = I->WizardTextColor;
   float black[3] = { 0.0F, 0.0F, 0.0F };
 
   if(I->WizardPromptVLA && prompt_mode) {
     vla = I->WizardPromptVLA;
 
-    if(gui_mode)
+    if(gui_mode != InternalGUIMode::Default)
       text_color = black;
     nLine = UtilCountStringVLA(vla);
     if(nLine) {
@@ -2088,7 +2081,7 @@ void OrthoDrawWizardPrompt(PyMOLGlobals * G ORTHOCGOARG)
 
       if(prompt_mode == 1) {
 	if (orthoCGO){
-	  if(SettingGetGlobal_b(G, cSetting_internal_gui_mode)) {
+	  if(gui_mode != InternalGUIMode::Default) {
 	    CGOColor(orthoCGO, 1.0, 1.0F, 1.0F);
 	  } else {
 	    CGOColorv(orthoCGO, I->WizardBackColor);
@@ -2100,7 +2093,7 @@ void OrthoDrawWizardPrompt(PyMOLGlobals * G ORTHOCGOARG)
 	  CGOVertex(orthoCGO, rect.left, rect.bottom, 0.f);
 	  CGOEnd(orthoCGO);
 	} else {
-	  if(SettingGetGlobal_b(G, cSetting_internal_gui_mode)) {
+	  if(gui_mode != InternalGUIMode::Default) {
 	    glColor3f(1.0, 1.0F, 1.0F);
 	  } else {
 	    glColor3fv(I->WizardBackColor);
@@ -2138,7 +2131,7 @@ void OrthoDrawWizardPrompt(PyMOLGlobals * G ORTHOCGOARG)
         }
         if(c--) {
           if(*p) {
-            TextDrawChar(G, *p ORTHOCGOARGVAR);
+            TextDrawChar(G, *p, orthoCGO);
           }
           if(!*(p++)) {
             y = y - cOrthoLineHeight;
@@ -2178,8 +2171,10 @@ static void OrthoLayoutPanel(PyMOLGlobals * G,
     /* The Wizard Block is shown when a wizard is loaded, it is the area between the
        Executive Block and the ButMode Block, and is used for Wizard-related info/buttons */
     block = WizardGetBlock(G);
-    block->setMargin(height - executiveBottom + 1, m_left, wizardBottom, m_right);
-    block->active = false;
+    if (block) {
+      block->setMargin(height - executiveBottom + 1, m_left, wizardBottom, m_right);
+      block->active = false;
+    }
 
     /* The ButMode block shows info about which Mouse Mode, Selecting Mode, State info,
        and other info like frame rate. It is located under the Wizard Block, and above
@@ -2203,8 +2198,10 @@ static void OrthoLayoutPanel(PyMOLGlobals * G,
     /* The Wizard Block is shown when a wizard is loaded, it is the area between the
        Executive Block and the ButMode Block, and is used for Wizard-related info/buttons */
     block = WizardGetBlock(G);
-    block->setMargin(m_right, m_bottom, m_right, m_bottom);
-    block->active = false;
+    if (block) {
+      block->setMargin(m_right, m_bottom, m_right, m_bottom);
+      block->active = false;
+    }
 
     /* The ButMode block shows info about which Mouse Mode, Selecting Mode, State info,
        and other info like frame rate. It is located under the Wizard Block, and above
@@ -2279,8 +2276,9 @@ void OrthoReshape(PyMOLGlobals * G, int width, int height, int force)
       internal_gui_width = 0;
       sceneRight = 0;
     } else {
-      switch (SettingGetGlobal_i(G, cSetting_internal_gui_mode)) {
-      case 2:
+      auto gui_mode = SettingGet<InternalGUIMode>(cSetting_internal_gui_mode, G->Setting);
+      switch (gui_mode) {
+      case InternalGUIMode::Transparent:
         sceneRight = 0;
         sceneBottom = 0;
         break;
@@ -2358,13 +2356,15 @@ void OrthoReshapeWizard(PyMOLGlobals * G, ov_size wizHeight)
     block = ExecutiveGetBlock(G);
     block->reshape(I->Width, I->Height);
     block = WizardGetBlock(G);
-    block->reshape(I->Width, I->Height);
-    block->active = wizHeight ? true : false;
+    if (block) {
+      block->reshape(I->Width, I->Height);
+      block->active = wizHeight ? true : false;
+    }
   }
 }
 
 /*========================================================================*/
-int OrthoGetWrapClickSide(PyMOLGlobals * G)
+ClickSide OrthoGetWrapClickSide(PyMOLGlobals* G)
 {
   return G->Ortho->WrapClickSide;
 }
@@ -2398,7 +2398,7 @@ int OrthoButton(PyMOLGlobals * G, int button, int state, int x, int y, int mod)
       x = get_wrap_x(x, &I->LastX, G->Option->winX, &I->WrapClickSide);
     }
   } else {
-    I->WrapClickSide = 0;
+    I->WrapClickSide = ClickSide::None;
   }
 
   OrthoRemoveSplash(G);
@@ -2442,33 +2442,13 @@ int OrthoButton(PyMOLGlobals * G, int button, int state, int x, int y, int mod)
   return (handled);
 }
 
-struct COrthoButtonDeferred : public CDeferred {
-  int button;
-  int state;
-  int x;
-  int y;
-  int mod;
-  COrthoButtonDeferred(PyMOLGlobals *G) : CDeferred(G) {}
-};
-
-static
-void OrthoButtonDeferred(COrthoButtonDeferred * d)
+int OrthoButtonDefer(
+    PyMOLGlobals* G, int button, int state, int x, int y, int mod)
 {
-  OrthoButton(d->m_G, d->button, d->state, d->x, d->y, d->mod);
-}
-
-int OrthoButtonDefer(PyMOLGlobals * G, int button, int state, int x, int y, int mod)
-{
-  auto d = pymol::make_unique<COrthoButtonDeferred>(G);
-  if(d) {
-    d->fn = (DeferredFn *)OrthoButtonDeferred;
-    d->button = button;
-    d->state = state;
-    d->x = x;
-    d->y = y;
-    d->mod = mod;
-  }
-  OrthoDefer(G, std::move(d));
+  std::function<void()> deferred = [=]() {
+    OrthoButton(G, button, state, x, y, mod);
+  };
+  OrthoDefer(G, std::move(deferred));
   return 1;
 }
 
@@ -2583,7 +2563,6 @@ int OrthoInit(PyMOLGlobals * G, int showSplash)
     I->Pushed = 0;
     I->cmdActiveQueue = &(*I->cmdQueue.begin());
     I->cmdNestLevel = 0;
-    I->RenderMode = 0;
     I->WrapXFlag = false;
 
     I->WizardBackColor[0] = 0.2F;
@@ -2680,29 +2659,25 @@ void OrthoFree(PyMOLGlobals * G)
 
 
 /*========================================================================*/
-void OrthoPushMatrix(PyMOLGlobals * G)
+void OrthoPushMatrix(PyMOLGlobals* G)
 {
-  COrtho *I = G->Ortho;
+  COrtho* I = G->Ortho;
 
-  if(G->HaveGUI && G->ValidContext) {
-
-    if(!I->Pushed) {
-      glGetIntegerv(GL_VIEWPORT, I->ViewPort);
+  if (G->HaveGUI && G->ValidContext) {
+    if (!I->Pushed) {
+      I->Viewport = SceneGetViewport(G);
     }
-    switch (I->RenderMode) {
-    case 2:
-      glViewport(I->ViewPort[0] + I->ViewPort[2], I->ViewPort[1],
-                 I->ViewPort[2], I->ViewPort[3]);
-      break;
-    case 1:
-    default:
-      glViewport(I->ViewPort[0], I->ViewPort[1], I->ViewPort[2], I->ViewPort[3]);
+    auto viewport = I->Viewport;
+    if (I->RenderMode == OrthoRenderMode::GeoWallRight) {
+      viewport.offset.x += viewport.extent.width;
     }
+    SceneSetViewport(G, viewport);
 
     glMatrixMode(GL_PROJECTION);
     glPushMatrix();
     glLoadIdentity();
-    glOrtho(0, I->ViewPort[2], 0, I->ViewPort[3], -100, 100);
+    glOrtho(0, I->Viewport.extent.width, 0,
+            I->Viewport.extent.height, -100, 100);
     glMatrixMode(GL_MODELVIEW);
     glPushMatrix();
     glLoadIdentity();
@@ -2740,7 +2715,7 @@ void OrthoPopMatrix(PyMOLGlobals * G)
   if(G->HaveGUI && G->ValidContext) {
 
     if(I->Pushed >= 0) {
-      glViewport(I->ViewPort[0], I->ViewPort[1], I->ViewPort[2], I->ViewPort[3]);
+      SceneSetViewport(G, I->Viewport);
       glPopMatrix();
       glMatrixMode(GL_PROJECTION);
       glPopMatrix();
@@ -2762,6 +2737,11 @@ void OrthoCommandIn(COrtho& ortho, const char* buffer)
   if (ortho.cmdActiveQueue) {
     ortho.cmdActiveQueue->emplace(buffer);
   }
+}
+
+void OrthoCommandIn(PyMOLGlobals* G, const char* buffer)
+{
+  OrthoCommandIn(*G->Ortho, buffer);
 }
 
 void OrthoCommandSetBusy(PyMOLGlobals * G, int busy){

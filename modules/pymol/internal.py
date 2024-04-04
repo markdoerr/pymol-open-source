@@ -1,6 +1,3 @@
-
-from __future__ import print_function, absolute_import
-
 import os
 import sys
 cmd = sys.modules["pymol.cmd"]
@@ -8,12 +5,8 @@ from pymol import _cmd
 import threading
 import traceback
 
-if sys.version_info[0] == 2:
-    import thread
-    import urllib2
-else:
-    import _thread as thread
-    import urllib.request as urllib2
+import _thread as thread
+import urllib.request as urllib2
 
 import re
 import time
@@ -256,12 +249,12 @@ def _mpng(prefix, first=-1, last=-1, preserve=0, modal=0,
     try:
         _self.lock(_self)
         fname = prefix
-        if re.search("[0-9]*\.png$",fname): # remove numbering, etc.
-            fname = re.sub("[0-9]*\.png$","",fname)
-        if re.search("[0-9]*\.ppm$",fname):
+        if re.search(r"[0-9]*\.png$",fname): # remove numbering, etc.
+            fname = re.sub(r"[0-9]*\.png$","",fname)
+        if re.search(r"[0-9]*\.ppm$",fname):
             if format<0:
                 format = 1 # PPM
-            fname = re.sub("[0-9]*\.ppm$","",fname)
+            fname = re.sub(r"[0-9]*\.ppm$","",fname)
         if format<0:
             format = 0 # default = PNG
         fname = cmd.exp_path(fname)
@@ -276,13 +269,8 @@ def _mpng(prefix, first=-1, last=-1, preserve=0, modal=0,
 # copy image
 
 def _copy_image(_self=cmd,quiet=1):
-    r = DEFAULT_ERROR
-    try:
-        _self.lock(_self)
-        r = _cmd.copy_image(_self._COb,int(quiet))
-    finally:
-        _self.unlock(r,_self)
-    return r
+    # cmd._copy_image may be monkey-patched by GUI implementations
+    raise NotImplementedError
 
 
 # loading
@@ -330,8 +318,7 @@ def download_chem_comp(resn, quiet=1, _self=cmd):
     if os.path.exists(filename):
         return filename
 
-    url = "ftp://ftp.ebi.ac.uk/pub/databases/msd/pdbechem/files/mmcif/" + resn + ".cif"
-    url = "http://files.rcsb.org/ligands/download/" + resn + ".cif"
+    url = "https://files.rcsb.org/ligands/download/" + resn + ".cif"
     if not quiet:
         print(' Downloading ' + url)
 
@@ -480,7 +467,7 @@ def _special(k,x,y,m=0,_self=cmd): # INTERNAL (invoked when special key is press
     # check for scenes and views
 
     for (fn, sc) in [
-            (_self.scene, pymol._scene_dict_sc),
+            (_self.scene, Shortcut(_self.get_scene_list())),
             (_self.view,  pymol._view_dict_sc),
             ]:
         if key in sc.keywords:
@@ -523,29 +510,6 @@ def _ctsh(k,_self=cmd):
     _invoke_key('CTSH-' + k, 0, _self)
 
 
-# writing PNG files (thread-unsafe)
-
-def _png(a,width=0,height=0,dpi=-1.0,ray=0,quiet=1,prior=0,format=-1,_self=cmd):
-    # INTERNAL - can only be safely called by GLUT thread (unless prior == 1)
-    # WARNING: internal routine, subject to change
-    try:
-        _self.lock(_self)
-        fname = a
-        if re.search("\.ppm$",fname):
-            if format<0:
-                format = 1 # PPM
-        elif not re.search("\.png$",fname):
-            if a[0:1] != chr(1): # not an encoded file descriptor (integer)
-                fname = fname +".png"
-        if format<0:
-            format = 0 # PNG
-        fname = cmd.exp_path(fname)
-        r = _cmd.png(_self._COb,str(fname),int(width),int(height),
-                     float(dpi),int(ray),int(quiet),int(prior),int(format))
-    finally:
-        _self.unlock(-1,_self)
-    return r
-
 # quitting (thread-specific)
 
 def _quit(code=0, _self=cmd):
@@ -579,17 +543,18 @@ def _quit(code=0, _self=cmd):
 def _refresh(swap_buffers=1,_self=cmd):  # Only call with GLUT thread!
     # WARNING: internal routine, subject to change
     r = None
-    try:
-        _self.lock(_self)
-        if _self.is_gui_thread():
+    if _self.is_gui_thread():
+        def func():
+            with _self.lockcm:
                 if swap_buffers:
                     r = _cmd.refresh_now(_self._COb)
                 else:
                     r = _cmd.refresh(_self._COb)
-        else:
+                return r
+        r = _self._call_with_opengl_context(func)
+    else:
+        with _self.lockcm:
             r = _cmd.refresh_later(_self._COb)
-    finally:
-        _self.unlock(-1,_self)
     return r
 
 # color alias interpretation

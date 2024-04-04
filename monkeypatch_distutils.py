@@ -15,9 +15,10 @@ import distutils.unixccompiler
 from distutils import log
 from distutils.errors import (DistutilsExecError, DistutilsPlatformError,
                               CompileError, LibError, LinkError)
+from multiprocessing.pool import ThreadPool
 
 # threaded parallel map (optional)
-pmap = map
+parallel_jobs = 1
 
 try:
     import _osx_support
@@ -40,13 +41,9 @@ def set_parallel_jobs(N):
     N=1 : single threaded
     N=0 : use number of CPUs
     '''
-    global pmap
+    global parallel_jobs
 
-    if N == 1:
-        pmap = map
-    else:
-        from multiprocessing import pool
-        pmap = pool.ThreadPool(N or None).map
+    parallel_jobs = N or None
 
 
 def incremental_parallel_compile(single_compile, objects, force):
@@ -80,8 +77,10 @@ def incremental_parallel_compile(single_compile, objects, force):
 
         return False
 
-    for _ in pmap(single_compile, filter(need_compile, objects)):
-        pass
+    with ThreadPool(parallel_jobs) as p:
+        pmap = map if parallel_jobs == 1 else p.map
+        for _ in pmap(single_compile, filter(need_compile, objects)):
+            pass
 
 
 def monkeypatch(parent, name):
@@ -121,10 +120,11 @@ def strip_broken_isysroot(args, start=0):
 def customize_compiler(compiler):
     # remove problematic flags
     if sys.platform == 'linux' and (
+            'icpc' in os.getenv('CXX', '') or
             'clang' in os.getenv('CC', '') or
             'clang' in os.getenv('LD', '')):
         import re
-        re_flto = re.compile(r'-flto\S*')
+        re_flto = re.compile(r'-flto\S*|-fno-semantic-interposition')
         config_vars = distutils.sysconfig.get_config_vars()
         for (key, value) in config_vars.items():
             if re_flto.search(str(value)) is not None:
@@ -147,9 +147,9 @@ def customize_compiler(compiler):
 
     cxx_cmd = cxx + ' ' + cxxflags
 
-    # C++11 by default
+    # C++17 by default
     if '-std=' not in cxx_cmd:
-        cxx_cmd += ' -std=c++11'
+        cxx_cmd += ' -std=c++17'
 
     compiler.set_executables(
             compiler_cxx=cxx_cmd,

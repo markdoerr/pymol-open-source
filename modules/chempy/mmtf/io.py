@@ -17,17 +17,11 @@ try:
 except ImportError:
     import umsgpack as msgpack
 
-if sys.version_info[0] < 3:
-    from urllib import urlopen
-    izip = itertools.izip
-    izip_longest = itertools.izip_longest
-    as_msgpack_key = lambda k: k
-else:
-    # python3
+if True:
     from urllib.request import urlopen
     izip = zip
     izip_longest = itertools.zip_longest
-    as_msgpack_key = lambda k: k if isinstance(k, bytes) else k.encode()
+    as_msgpack_key = lambda k: k if isinstance(k, str) else k.decode("utf-8")
     buffer = lambda s, i=0: memoryview(s)[i:]
 
 # should be replaced with a more efficient numpy-array aware iterator
@@ -224,13 +218,13 @@ class MmtfReader:
     def __init__(self, data):
         if isinstance(data, bytes):
             if data[:2] != b'\x1f\x8b': # gzip magic number
-                self._data = msgpack.unpackb(data)
+                self._data = msgpack.unpackb(data, raw=False)
                 return
 
             import io, gzip
             data = gzip.GzipFile(fileobj=io.BytesIO(data))
 
-        self._data = msgpack.unpack(data)
+        self._data = msgpack.unpack(data, raw=False)
 
     @classmethod
     def from_url(cls, url):
@@ -244,7 +238,7 @@ class MmtfReader:
         except KeyError:
             return default
 
-        if not (key.endswith(b'List') and isinstance(value, bytes)):
+        if not (key.endswith('List') and isinstance(value, bytes)):
             return value
 
         return decode(value)

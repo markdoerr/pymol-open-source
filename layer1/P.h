@@ -23,6 +23,8 @@ Z* -------------------------------------------------------------------
 #include"CoordSet.h"
 #include"PyMOLGlobals.h"
 
+#include "pymol/zstring_view.h"
+
 #define cLockAPI 1
 #define cLockInbox 2
 #define cLockOutbox 3
@@ -46,8 +48,9 @@ Z* -------------------------------------------------------------------
 #define cPType_properties     12
 #define cPType_state          13
 #define cPType_schar          14
+#define cPType_uint32         15
 
-#define NUM_ATOM_PROPERTIES    41
+#define NUM_ATOM_PROPERTIES    43
 
 #define cPRunType_alter          1
 #define cPRunType_alter_state    2
@@ -69,9 +72,6 @@ int PLabelAtomAlt(PyMOLGlobals * G, AtomInfoType * at, const char *model, const 
 
 #define PBlock(G)
 #define PUnblock(G)
-
-#define PBlockLegacy()
-#define PUnblockLegacy()
 
 #define PLockAPIAsGlut(G,block_if_busy)
 #define PUnlockAPIAsGlut(G)
@@ -135,17 +135,17 @@ void PGetOptions(CPyMOLOptions * rec);
 
 void PFree(PyMOLGlobals * G);
 void PExit(PyMOLGlobals * G, int code);
-void PParse(PyMOLGlobals * G, const char *str);       /* only accepts one command */
+void PParse(PyMOLGlobals * G, pymol::zstring_view str_view);       /* only accepts one command */
 void PDo(PyMOLGlobals * G, const char *str);  /* accepts multple commands seperated by newlines */
 
-int PAlterAtom(PyMOLGlobals * G, ObjectMolecule *obj, CoordSet *cs, PyCodeObject *expr_co,
+int PAlterAtom(PyMOLGlobals * G, ObjectMolecule *obj, CoordSet *cs, PyObject *expr_co,
                int read_only, int atm, PyObject * space);
-int PLabelAtom(PyMOLGlobals * G, ObjectMolecule *obj, CoordSet *cs, PyCodeObject *expr_co, int atm);
-int PAlterAtomState(PyMOLGlobals * G, PyCodeObject *expr_co, int read_only,
+int PLabelAtom(PyMOLGlobals * G, ObjectMolecule *obj, CoordSet *cs, PyObject *expr_co, int atm);
+int PAlterAtomState(PyMOLGlobals * G, PyObject *expr_co, int read_only,
                     ObjectMolecule *obj, CoordSet *cs, int atm, int idx,
                     int state, PyObject * space);
 
-void PLog(PyMOLGlobals * G, const char *str, int lf);
+void PLog(PyMOLGlobals * G, pymol::zstring_view str, int lf);
 void PLogFlush(PyMOLGlobals * G);
 
 void PSleep(PyMOLGlobals * G, int usec);
@@ -166,9 +166,6 @@ void PUnlockStatus(PyMOLGlobals * G);
 void PBlock(PyMOLGlobals * G);
 void PUnblock(PyMOLGlobals * G);
 
-void PBlockLegacy(void);
-void PUnblockLegacy(void);
-
 int PAutoBlock(PyMOLGlobals * G);
 void PAutoUnblock(PyMOLGlobals * G, int flag);
 
@@ -180,7 +177,20 @@ int PFlush(PyMOLGlobals * G);
 int PFlushFast(PyMOLGlobals * G);
 void PXDecRef(PyObject * obj);
 PyObject *PXIncRef(PyObject * obj);
+
+/**
+ * Like `Py_INCREF` but returns the input argument for convenience.
+ * Does not accept NULL, unlike `PXIncRef`.
+ */
+inline PyObject* PIncRef(PyObject* obj)
+{
+  Py_INCREF(obj);
+  return obj;
+}
+
 void PDefineFloat(PyMOLGlobals * G, const char *name, float value);
+
+void PErrPrintIfOccurred(PyMOLGlobals*);
 
 void PRunStringModule(PyMOLGlobals * G, const char *str);
 void PRunStringInstance(PyMOLGlobals * G, const char *str);
@@ -206,8 +216,9 @@ typedef struct {
   PyThreadState *state;
 } SavedThreadRec;
 
-typedef struct {
-  PyObject_HEAD
+struct SettingPropertyWrapperObject;
+
+struct WrapperObject : PyObject {
   //  PyObject* dict;
   ObjectMolecule *obj;
   CoordSet *cs;
@@ -218,18 +229,15 @@ typedef struct {
   short read_only; // set for PLabelAtom
   PyMOLGlobals * G;
   PyObject *dict;
-  PyObject *settingWrapperObject;
-#ifdef _PYMOL_IP_EXTRAS
-  PyObject *propertyWrapperObject;
+  SettingPropertyWrapperObject* settingWrapperObject;
+#ifdef _PYMOL_IP_PROPERTIES
+  SettingPropertyWrapperObject* propertyWrapperObject;
 #endif
-} WrapperObject;
+};
 
-void WrapperObjectReset(WrapperObject *);
-
-typedef struct {
-  PyObject_HEAD
-  WrapperObject *wobj;
-} SettingPropertyWrapperObject;
+struct SettingPropertyWrapperObject : PyObject {
+  WrapperObject* wobj;
+};
 
 /* instance-specific Python object, containers, closures, and threads */
 
@@ -262,6 +270,51 @@ struct _CP_inst {
   SavedThreadRec savedThread[MAX_SAVED_THREAD];
 };
 
+using unique_PyObject_ptr_auto_gil = std::unique_ptr<PyObject, pymol::pyobject_delete_auto_gil>;
+
+namespace pymol
+{
+
+/**
+ * Handy RAII applications for acquiring the GIL
+ */
+
+class pblock
+{
+  PyMOLGlobals* m_G{nullptr};
+
+public:
+  pblock(PyMOLGlobals* G) : m_G(G) { PBlock(m_G); }
+  ~pblock() { PUnblock(m_G); }
+};
+
+class pautoblock
+{
+  PyMOLGlobals* m_G;
+  int m_blocked{};
+
+public:
+  pautoblock(PyMOLGlobals* G) : m_G(G), m_blocked(PAutoBlock(m_G)) {}
+  ~pautoblock() { PAutoUnblock(m_G, m_blocked); }
+};
+
+/**
+ * Shares ownership of a managed Python object.
+ * @param obj Borrowed reference whose ownership will be transferred
+ * @return owning pointer to Python object
+ */
+
+unique_PyObject_ptr_auto_gil make_auto_gil(PyObject* obj);
+
+} // namespace pymol
+
+/**
+ * Makes Deep Copy of PyObject
+ * @param input source PyObject to be copied
+ * @return new PyObject
+ */
+
+unique_PyObject_ptr_auto_gil PDeepCopy(PyMOLGlobals* G, PyObject* input);
 
 /* PyObject *GetBondsDict(void); */
 
@@ -277,6 +330,7 @@ extern PyObject *P_setting;     /* used by Setting.c */
 extern PyTypeObject *P_wrapper;     /* used by P.c for lazy-loading settings/properties/attributes */
 extern PyObject *P_CmdException;    /* pymol.CmdException */
 extern PyObject *P_QuietException;  /* pymol.parsing.CmdException */
+extern PyObject *P_IncentiveOnlyException; /* pymol.IncentiveOnlyException */
 
 #endif
 #endif

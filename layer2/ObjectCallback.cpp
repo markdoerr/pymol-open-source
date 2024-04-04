@@ -20,7 +20,7 @@ Z* -------------------------------------------------------------------
 #include"os_std.h"
 #include"os_gl.h"
 
-#include"OOMac.h"
+#include"Err.h"
 #include"ObjectCallback.h"
 #include"Base.h"
 #include"MemoryDebug.h"
@@ -29,6 +29,7 @@ Z* -------------------------------------------------------------------
 #include"PConv.h"
 #include"main.h"
 #include"Setting.h"
+#include "Feedback.h"
 
 /*========================================================================*/
 
@@ -67,11 +68,11 @@ void ObjectCallback::render(RenderInfo * info)
   int state = info->state;
   CRay *ray = info->ray;
   auto pick = info->pick;
-  int pass = info->pass;
+  const RenderPass pass = info->pass;
   PyMOLGlobals *G = I->G;
   ObjectCallbackState *sobj = NULL;
 
-  if(pass != 1) /* for now, the callback should be called during the first pass (opaque), so 
+  if(pass != RenderPass::Opaque) /* for now, the callback should be called during the first pass (opaque), so
 		  that it is possible to set positions for any object that is rendered in the 
 		  opaque pass.  This is still a kludge, since the callback should probably 
 		  happen in a pass before this (should we add a new pass 2?  this will probably
@@ -96,7 +97,7 @@ void ObjectCallback::render(RenderInfo * info)
 
   if((I->visRep & cRepCallbackBit)) {
     int blocked = PAutoBlock(G);
-    for(StateIterator iter(G, I->Setting, state, I->NState); iter.next();) {
+    for(StateIterator iter(G, I->Setting.get(), state, I->NState); iter.next();) {
       sobj = I->State + iter.state;
       if(!sobj->is_callable)
         continue;
@@ -119,7 +120,7 @@ int ObjectCallback::getNFrame() const
 
 
 /*========================================================================*/
-ObjectCallback::ObjectCallback(PyMOLGlobals * G) : CObject(G)
+ObjectCallback::ObjectCallback(PyMOLGlobals * G) : pymol::CObject(G)
 {
   State = VLACalloc(ObjectCallbackState, 10);       /* autozero */
   type = cObjectCallback;

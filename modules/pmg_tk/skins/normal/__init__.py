@@ -1,6 +1,3 @@
-
-from __future__ import print_function
-
 DEBUG = False
 
 import sys
@@ -9,13 +6,7 @@ import threading
 import os
 import time
 
-if sys.version_info[0] == 2:
-    from Tkinter import *
-    import tkFileDialog
-    import tkMessageBox
-    import tkFont
-    _next_method_name = 'next'
-else:
+if True:
     from tkinter import *
     import tkinter.filedialog as tkFileDialog
     import tkinter.messagebox as tkMessageBox
@@ -40,23 +31,7 @@ import traceback
 root = None
 
 def encode(s):
-    '''If `s` is unicode, attempt to encode it. On faiure, return the
-    unicode input.
-
-    Our C file I/O implementations can't handle unicode. For some file
-    types we support reading the file in Python (supports unicode) and
-    passing the content to the underlying C routine.
-    '''
-    if sys.version_info[0] >= 3:
-        return s
-    if not isinstance(s, bytes):
-        for enc in [sys.getfilesystemencoding(), 'latin1']:
-            try:
-                e = s.encode(enc)
-                if os.path.exists(e):
-                    return e
-            except UnicodeEncodeError:
-                pass
+    # obsolete since removal of py2 
     return s
 
 def split_tk_file_list(pattern):
@@ -124,6 +99,9 @@ class Normal(PMGSkin, pymol._gui.PyMOLDesktopGUI):
     contactweb     = 'http://www.pymol.org'
     contactemail   = 'sales@schrodinger.com'
     
+    def scene_panel_menu_dialog(self):
+        print("scene_panel_menu_dialog not available in pmg_tk.")
+
     # responsible for setup and takedown of the normal skin
 
     def _inc_fontsize(self, delta, font):
@@ -871,7 +849,7 @@ PyMOL> color ye<TAB>    (will autocomplete "yellow")
                                     # _state004
                                     inter = "_state" + str(stateSave).zfill(len(str(s))+1)
                                     # g either MATCHES *.pdb or not.  If so, save, name_stateXYZ.pdb
-                                    g = re.search("(.*)(\..*)$", save_file)
+                                    g = re.search(r"(.*)(\..*)$", save_file)
                                     if g!=None:
                                         # 1PDB_state004.pdb
                                         save_file = g.groups()[0] + inter + g.groups()[1]
@@ -911,7 +889,7 @@ PyMOL> color ye<TAB>    (will autocomplete "yellow")
                                         ])
         if len(ofile):
             self.__script__ = ofile
-            if re.search("\.pym*$|\.PYM*$",ofile):
+            if re.search(r"\.pym*$|\.PYM*$",ofile):
                 self.cmd.do("run "+ofile);      
             else:
                 self.cmd.do("@"+ofile);
@@ -954,9 +932,9 @@ PyMOL> color ye<TAB>    (will autocomplete "yellow")
 
     def file_save_mpeg(self):
         try:
-            from freemol import mpeg_encode
+            from pymol import mpeg_encode
             if not mpeg_encode.validate():
-                print("produce-error: Unable to validate freemol.mpeg_encode")
+                print("produce-error: Unable to validate pymol.mpeg_encode")
                 raise
         except:
             tkMessageBox.showerror("Error",

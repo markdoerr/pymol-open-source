@@ -22,7 +22,6 @@ Z* -------------------------------------------------------------------
 #include"Pixmap.h"
 #include"Util.h"
 #include"MemoryDebug.h"
-#include"OOMac.h"
 #include"Vector.h"
 #include"Text.h"
 #include"Texture.h"
@@ -201,7 +200,7 @@ float CharacterGetAdvance(PyMOLGlobals * G, int sampling, int id)
   return rec->Advance / sampling;
 }
 
-void CharacterRenderOpenGLPrime(PyMOLGlobals * G, RenderInfo * info)
+void CharacterRenderOpenGLPrime(PyMOLGlobals * G, const RenderInfo * info)
 {
   if(G->HaveGUI && G->ValidContext) {
     if ((info && !info->use_shaders) || (!info && !SettingGetGlobal_b(G, cSetting_use_shaders))){
@@ -213,7 +212,7 @@ void CharacterRenderOpenGLPrime(PyMOLGlobals * G, RenderInfo * info)
   }
 }
 
-void CharacterRenderOpenGLDone(PyMOLGlobals * G, RenderInfo * info)
+void CharacterRenderOpenGLDone(PyMOLGlobals * G, const RenderInfo * info)
 {
   if(G->HaveGUI && G->ValidContext) {
     if ((info && !info->use_shaders) || (!info && !SettingGetGlobal_b(G, cSetting_use_shaders))){
@@ -223,25 +222,27 @@ void CharacterRenderOpenGLDone(PyMOLGlobals * G, RenderInfo * info)
   }
 }
 
-short CharacterRenderOpenGL(PyMOLGlobals * G, RenderInfo * info, int id, short isworldlabel, short relativeMode SHADERCGOARG)
+short CharacterRenderOpenGL(PyMOLGlobals * G, const RenderInfo * info, int id, short isworldlabel, short relativeMode, CGO* shaderCGO)
 
 /* need orientation matrix */
 {
   CCharacter *I = G->Character;
   CharRec *rec = I->Char + id;
   short success = 1;
-  int texture_id = TextureGetFromChar(G, id, rec->extent);
+  auto isTextured = TextureIsCharTextured(G, id, rec->extent);
   float sampling = 1.0F;
 
-  if(G->HaveGUI && G->ValidContext && texture_id) {
+  if (G->HaveGUI && G->ValidContext && isTextured) {
     if(info)
       sampling = (float) info->sampling;
-    if(texture_id) {
+    if (isTextured) {
     /*    if(glIsTexture(texture_id)) -- BAD -- impacts performance */
       float *v, v0[3];
       float v1[3];
       if (!shaderCGO){
-        glBindTexture(GL_TEXTURE_2D, TextGetIsPicking(G) ? 0 : texture_id);
+        if (!TextGetIsPicking(G)) {
+          TextureBindTexture(G);
+        }
       }
       v = TextGetPos(G);
       copy3f(v, v0);
@@ -264,7 +265,7 @@ short CharacterRenderOpenGL(PyMOLGlobals * G, RenderInfo * info, int id, short i
                                              relativeMode,
                                              glm::make_vec3(targetPos));
 	  } else {
-	    CGODrawTexture(shaderCGO, texture_id, worldPos, v0, v1, rec->extent);
+	    CGODrawTexture(shaderCGO, worldPos, v0, v1, rec->extent);
 	  }
       } else {
 #ifndef PURE_OPENGL_ES_2
@@ -293,7 +294,7 @@ short CharacterRenderOpenGL(PyMOLGlobals * G, RenderInfo * info, int id, short i
     }
      TextAdvance(G, rec->Advance / sampling);
   } else {
-    if (!texture_id)
+    if (!isTextured)
       success = 0;
   }
   return success;

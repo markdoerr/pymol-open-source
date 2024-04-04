@@ -1,6 +1,4 @@
 
-from __future__ import print_function
-
 import itertools, os
 from glob import glob
 
@@ -41,7 +39,7 @@ def undoablemethod(sele):
 
 class ActionWizard(Wizard):
 
-    def __init__(self,_self):
+    def __init__(self, _self=pymol.cmd):
         Wizard.__init__(self,_self)
         self.actionHash = str(self.__class__)
 
@@ -91,7 +89,7 @@ class ActionWizard(Wizard):
 
 class CleanWizard(ActionWizard):
 
-    def __init__(self,_self):
+    def __init__(self, _self=pymol.cmd):
         self.clean_obj = None
         ActionWizard.__init__(self,_self)
 
@@ -136,7 +134,7 @@ class CleanWizard(ActionWizard):
 
 class SculptWizard(ActionWizard):
 
-    def __init__(self,_self):
+    def __init__(self, _self=pymol.cmd):
         ActionWizard.__init__(self,_self)
         self.sculpt_object = None
 
@@ -230,7 +228,7 @@ class SculptWizard(ActionWizard):
 
 class RepeatableActionWizard(ActionWizard):
 
-    def __init__(self,_self):
+    def __init__(self, _self=pymol.cmd):
         ActionWizard.__init__(self,_self)
         self.repeating = 0
 
@@ -304,7 +302,7 @@ class ReplaceWizard(RepeatableActionWizard):
 
 class AttachWizard(RepeatableActionWizard):
 
-    def __init__(self,_self):
+    def __init__(self, _self=pymol.cmd):
         RepeatableActionWizard.__init__(self,_self)
         self.mode = 0
 
@@ -375,9 +373,18 @@ class AttachWizard(RepeatableActionWizard):
 
 class AminoAcidWizard(RepeatableActionWizard):
 
-    def __init__(self,_self):
+    def __init__(self, _self=pymol.cmd, ss=-1):
         RepeatableActionWizard.__init__(self,_self)
         self.mode = 0
+        self.setSecondaryStructure(ss)
+
+    def setSecondaryStructure(self, ss):
+        self._secondary_structure = ss
+
+    def attach_monomer(self, objectname=""):
+         editor.attach_amino_acid("?pk1", self.aminoAcid, object=objectname,
+                ss=self._secondary_structure,
+                 _self=self.cmd)
 
     def do_pick(self, bondFlag):
         # since this function can change any position of atoms in a related
@@ -386,7 +393,7 @@ class AminoAcidWizard(RepeatableActionWizard):
             self.cmd.select(active_sele, "bymol pk1")
             try:
                 with undocontext(self.cmd, "bymol ?pk1"):
-                    editor.attach_amino_acid("pk1", self.aminoAcid, _self=self.cmd)
+                    self.attach_monomer(self.aminoAcid)
             except QuietException:
                 fin = -1
         elif self.mode == 1:
@@ -412,7 +419,8 @@ class AminoAcidWizard(RepeatableActionWizard):
             if name not in names:
                 break
             num = num + 1
-        editor.attach_amino_acid("pk1", self.aminoAcid, object=name, _self=self.cmd)
+        self.attach_monomer(self.aminoAcid)
+
         if not self.getRepeating():
             self.actionWizardDone()
 
@@ -1003,8 +1011,8 @@ class _BuilderPanel(QtWidgets.QWidget):
               ("Cl", "Chlorrine", lambda: self.replace("Cl",1,1, "Chlorine")),
               ("Br", "Bromine", lambda: self.replace("Br",1,1, "Bromine")),
               ("I", "Iodine", lambda: self.replace("I",1,1, "Iodine")),
-              ("-CF3", "Trifluoromethane", lambda: self.replace("trifluoromethane",4,0, "trifluoro")),
-              ("-OMe", "Methanol", lambda: self.replace("methanol",5,0, "methoxy")),
+              ("-CF3", "Trifluoromethane", lambda: self.grow("trifluoromethane",4,0, "trifluoro")),
+              ("-OMe", "Methanol", lambda: self.grow("methanol",5,0, "methoxy")),
             ],
             [ ("CH4", "Methyl", lambda: self.grow("methane",1,0,"methyl")),
               ("C=C", "Ethylene", lambda: self.grow("ethylene",4,0,"vinyl")),
@@ -1072,6 +1080,7 @@ class _BuilderPanel(QtWidgets.QWidget):
         self.ss_cbox.addItem("Beta Sheet (Parallel)")
         self.protein_layout.addWidget(lab, 2, 0, 1, lab_cols)
         self.protein_layout.addWidget(self.ss_cbox, 2, lab_cols, 1, 4)
+        self.ss_cbox.currentIndexChanged[int].connect(self.ssIndexChanged)
 
         buttons = [
             [
@@ -1181,18 +1190,24 @@ class _BuilderPanel(QtWidgets.QWidget):
             ReplaceWizard(_self=self.cmd).toggle(atom,geometry,valence,text)
 
     def attach(self, aa):
+        ss = self.ss_cbox.currentIndex() + 1
         picked = collectPicked(self.cmd)
         if len(picked)==1:
             try:
                 with undocontext(self.cmd, "bymol %s" % picked[0]):
                     editor.attach_amino_acid(picked[0], aa,
-                            ss=self.ss_cbox.currentIndex() + 1, _self=self.cmd)
+                            ss=ss, _self=self.cmd)
             except:
                 fin = -1
             self.doZoom()
         else:
             self.cmd.unpick()
-            AminoAcidWizard(_self=self.cmd).toggle(aa)
+            AminoAcidWizard(_self=self.cmd, ss=ss).toggle(aa)
+
+    def ssIndexChanged(self, index):
+        w = self.cmd.get_wizard()
+        if isinstance(w, AminoAcidWizard):
+            w.setSecondaryStructure(index + 1)
 
     def doAutoPick(self, old_atoms=None):
         self.cmd.unpick()

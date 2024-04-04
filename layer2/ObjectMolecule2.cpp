@@ -16,6 +16,10 @@
 */
 #include <utility>
 
+#ifdef PYMOL_OPENMP
+#include <omp.h>
+#endif
+
 #include"Version.h"
 #include"os_python.h"
 
@@ -25,7 +29,7 @@
 
 #include"Base.h"
 #include"Parse.h"
-#include"OOMac.h"
+#include"Err.h"
 #include"Vector.h"
 #include"PConv.h"
 #include"ObjectMolecule.h"
@@ -34,6 +38,7 @@
 #include"Util2.h"
 #include"AtomInfo.h"
 #include"Selector.h"
+#include"SymOpPConv.h"
 #include"ObjectDist.h"
 #include"Executive.h"
 #include"P.h"
@@ -43,6 +48,14 @@
 
 #include"AtomInfoHistory.h"
 #include"BondTypeHistory.h"
+
+#ifdef _PYMOL_IP_PROPERTIES
+#include"Property.h"
+#endif
+
+#include "pymol/zstring_view.h"
+
+#include <functional>
 #include <iostream>
 #include <map>
 
@@ -103,58 +116,72 @@ typedef struct {
 static int populate_other(OtherRec * other, int at,
     const AtomInfoType* ai,
     const BondType* bd,
-    const int* neighbor)
+    const ObjectMolecule* obj)
 {
   int five_cycle = false;
   int six_cycle = false;
 
   {
-    int mem[9], nbr[7];
+    // don't get bogged down with structures that have unreasonable connectivity
     const int ESCAPE_MAX = 500;
-    int escape_count;
+    int escape_count = ESCAPE_MAX;
 
-    escape_count = ESCAPE_MAX;  /* don't get bogged down with structures 
-                                   that have unreasonable connectivity */
-    mem[0] = bd->index[0];
-    mem[1] = bd->index[1];
-    nbr[1] = neighbor[mem[1]] + 1;
-    while(((mem[2] = neighbor[nbr[1]]) >= 0)) {
-      if(mem[2] != mem[0]) {
-        nbr[2] = neighbor[mem[2]] + 1;
-        while(((mem[3] = neighbor[nbr[2]]) >= 0)) {
-          if(mem[3] != mem[1]) {
-            nbr[3] = neighbor[mem[3]] + 1;
-            while(((mem[4] = neighbor[nbr[3]]) >= 0)) {
-              if((mem[4] != mem[2]) && (mem[4] != mem[1]) && (mem[4] != mem[0])) {
-                nbr[4] = neighbor[mem[4]] + 1;
-                while(((mem[5] = neighbor[nbr[4]]) >= 0)) {
-                  if(!(escape_count--))
-                    goto escape;
-                  if((mem[5] != mem[3]) && (mem[5] != mem[2]) && (mem[5] != mem[1])) {
-                    if(mem[5] == mem[0]) {      /* five-cycle */
-                      five_cycle = true;
-                    }
-                    nbr[5] = neighbor[mem[5]] + 1;
-                    while(((mem[6] = neighbor[nbr[5]]) >= 0)) {
-                      if((mem[6] != mem[4]) && (mem[6] != mem[3]) && (mem[6] != mem[2])
-                         && (mem[6] != mem[1])) {
-                        if(mem[6] == mem[0]) {  /* six-cycle */
-                          six_cycle = true;
-                        }
-                      }
-                      nbr[5] += 2;
-                    }
-                  }
-                  nbr[4] += 2;
-                }
+    auto const mem0_atm = bd->index[0];
+    auto const mem1_atm = bd->index[1];
+
+    for (auto const& mem2 : AtomNeighbors(obj, mem1_atm)) {
+      if (mem2.atm == mem0_atm) {
+        continue;
+      }
+
+      for (auto const& mem3 : AtomNeighbors(obj, mem2.atm)) {
+        if (mem3.atm == mem1_atm) {
+          continue;
+        }
+
+        for (auto const& mem4 : AtomNeighbors(obj, mem3.atm)) {
+          if (mem4.atm == mem2.atm || mem4.atm == mem1_atm ||
+              mem4.atm == mem0_atm) {
+            continue;
+          }
+
+          for (auto const& mem5 : AtomNeighbors(obj, mem4.atm)) {
+            if (!(escape_count--)) {
+              goto escape;
+            }
+
+            if (mem5.atm == mem3.atm || mem5.atm == mem2.atm ||
+                mem5.atm == mem1_atm) {
+              continue;
+            }
+
+            if (mem5.atm == mem0_atm) { /* five-cycle */
+              five_cycle = true;
+
+              if (six_cycle) {
+                goto escape;
               }
-              nbr[3] += 2;
+            }
+
+            for (auto const& mem6 : AtomNeighbors(obj, mem5.atm)) {
+              if (mem6.atm == mem4.atm || mem6.atm == mem3.atm ||
+                  mem6.atm == mem2.atm || mem6.atm == mem1_atm) {
+                continue;
+              }
+
+              if (mem6.atm == mem0_atm) { /* six-cycle */
+                six_cycle = true;
+
+                if (five_cycle) {
+                  goto escape;
+                }
+
+                break;
+              }
             }
           }
-          nbr[2] += 2;
         }
       }
-      nbr[1] += 2;
     }
   }
 escape:
@@ -228,7 +255,7 @@ int ObjectMoleculeAddPseudoatom(ObjectMolecule * I, int sele_index, const char *
                                 const char *resn, const char *resi, const char *chain,
                                 const char *segi, const char *elem, float vdw,
                                 int hetatm, float b, float q, const char *label,
-                                float *pos, int color, int state, int mode, int quiet)
+                                const float *pos, int color, int state, int mode, int quiet)
 {
   PyMOLGlobals *G = I->G;
   int start_state = 0, stop_state = 0;
@@ -240,20 +267,23 @@ int ObjectMoleculeAddPseudoatom(ObjectMolecule * I, int sele_index, const char *
   pymol::vla<AtomInfoType> atInfo(1);
   AtomInfoType* ai = atInfo.data();
 
-#ifdef _PYMOL_IP_EXTRAS
-  atInfo->oldid = -1;
-#endif
+  // FIXME this should be cStateCurrent
+  if (state == cStateAll) {
+    state = I->getCurrentState();
+  }
 
   if(state >= 0) {              /* specific state */
     start_state = state;
     stop_state = state + 1;
-  } else if(state == -1) {      /* current state */
-    start_state = ObjectGetCurrentState(I, true);
-    stop_state = start_state + 1;
   } else {                      /* all states */
     if(sele_index >= 0) {
       start_state = 0;
       stop_state = SelectorCountStates(G, sele_index);
+
+      // Here, -3 does not mean cSelectorUpdateTableEffectiveStates. It means
+      // all states present in `sele_index` AND `I`. State != -3 means all
+      // states in `sele_index`, so it would create new states in `I` if they
+      // don't exist yet.
       if(state == -3)
         extant_only = true;
     } else {
@@ -363,8 +393,8 @@ int ObjectMoleculeAddPseudoatom(ObjectMolecule * I, int sele_index, const char *
           pos = NULL;           /* skip this state */
         }
       } else if(!pos) {
+        SceneGetCenter(I->G, pos_array);
         pos = pos_array;
-        SceneGetCenter(I->G, pos);
       }
 
       if(pos) {                 /* only add coordinate to state if we have position for it */
@@ -378,8 +408,6 @@ int ObjectMoleculeAddPseudoatom(ObjectMolecule * I, int sele_index, const char *
 	    ok &= ObjectMoleculeMerge(I, std::move(atInfo), cset, false, cAIC_AllMask, true);      /* NOTE: will release atInfo */
           if (ok)
 	    ok &= ObjectMoleculeExtendIndices(I, -1);
-          if (ok)
-	    ok &= ObjectMoleculeUpdateNeighbors(I);
           ai_merged = true;
         }
         if(state >= I->NCSet) {
@@ -398,7 +426,7 @@ int ObjectMoleculeAddPseudoatom(ObjectMolecule * I, int sele_index, const char *
     }
   }
 
-  cset->fFree();
+  delete cset;
 
   if(ai_merged) {
     if (ok)
@@ -426,28 +454,15 @@ int *ObjectMoleculeGetPrioritizedOtherIndexList(ObjectMolecule * I, CoordSet * c
 
   CHECKOK(ok, other);
 
-  if (ok){
-    ok &= ObjectMoleculeUpdateNeighbors(I);
-  }
   bd = I->Bond;
   for(a = 0; ok && a < I->NBond; a++) {
     b1 = bd->index[0];
     b2 = bd->index[1];
-    if(I->DiscreteFlag) {
-      if((cs == I->DiscreteCSet[b1]) && (cs == I->DiscreteCSet[b2])) {
-        a1 = I->DiscreteAtmToIdx[b1];
-        a2 = I->DiscreteAtmToIdx[b2];
-      } else {
-        a1 = -1;
-        a2 = -1;
-      }
-    } else {
-      a1 = cs->AtmToIdx[b1];
-      a2 = cs->AtmToIdx[b2];
-    }
+    a1 = cs->atmToIdx(b1);
+    a2 = cs->atmToIdx(b2);
     if((a1 >= 0) && (a2 >= 0)) {
-      n_alloc += populate_other(other + a1, a2, I->AtomInfo + b2, bd, I->Neighbor);
-      n_alloc += populate_other(other + a2, a1, I->AtomInfo + b1, bd, I->Neighbor);
+      n_alloc += populate_other(other + a1, a2, I->AtomInfo + b2, bd, I);
+      n_alloc += populate_other(other + a2, a1, I->AtomInfo + b1, bd, I);
     }
     bd++;
     ok &= !I->G->Interrupt;
@@ -468,18 +483,8 @@ int *ObjectMoleculeGetPrioritizedOtherIndexList(ObjectMolecule * I, CoordSet * c
   for(a = 0; ok && a < I->NBond; a++) {
     b1 = bd->index[0];
     b2 = bd->index[1];
-    if(I->DiscreteFlag) {
-      if((cs == I->DiscreteCSet[b1]) && (cs == I->DiscreteCSet[b2])) {
-        a1 = I->DiscreteAtmToIdx[b1];
-        a2 = I->DiscreteAtmToIdx[b2];
-      } else {
-        a1 = -1;
-        a2 = -1;
-      }
-    } else {
-      a1 = cs->AtmToIdx[b1];
-      a2 = cs->AtmToIdx[b2];
-    }
+    a1 = cs->atmToIdx(b1);
+    a2 = cs->atmToIdx(b2);
     if((a1 >= 0) && (a2 >= 0)) {
       if(result[a1] < 0) {
         o = other + a1;
@@ -562,11 +567,10 @@ int ObjectMoleculeGetNearestBlendedColor(ObjectMolecule * I, const float *point,
   color[1] = 0.0F;
   color[2] = 0.0F;
 
-  if(state < 0)
-    state = ObjectGetCurrentState(I, true);
+  assert(state != -1 /* all states */);
+  auto* cs = I->getCoordSet(state);
 
-  if((state >= 0) && (state < I->NCSet)) {
-    CoordSet *cs = I->CSet[state];
+  {
     if(cs) {
       MapType *map;
       CoordSetUpdateCoord2IdxMap(cs, cutoff);
@@ -585,7 +589,7 @@ int ObjectMoleculeGetNearestBlendedColor(ObjectMolecule * I, const float *point,
             for(f = c - 1; f <= c + 1; f++) {
               j = *(MapFirst(map, d, e, f));
               while(j >= 0) {
-                v = cs->Coord + (3 * j);
+                v = cs->coordPtr(j);
                 test = diffsq3f(v, point);
                 if(sub_vdw) {
                   test = sqrt1f(test);
@@ -661,10 +665,11 @@ int ObjectMoleculeGetNearestAtomIndex(ObjectMolecule * I, const float *point, fl
 {
   int result = -1;
   float nearest = -1.0F;
-  if(state < 0)
-    state = ObjectGetCurrentState(I, true);
-  if((state >= 0) && (state < I->NCSet)) {
-    CoordSet *cs = I->CSet[state];
+
+  assert(state != -1 /* all states */);
+  auto* cs = I->getCoordSet(state);
+
+  {
     if(cs) {
       MapType *map;
       CoordSetUpdateCoord2IdxMap(cs, cutoff);
@@ -679,7 +684,7 @@ int ObjectMoleculeGetNearestAtomIndex(ObjectMolecule * I, const float *point, fl
             for(f = c - 1; f <= c + 1; f++) {
               j = *(MapFirst(map, d, e, f));
               while(j >= 0) {
-                v = cs->Coord + (3 * j);
+                v = cs->coordPtr(j);
                 test = diffsq3f(v, point);
                 if(test <= nearest) {
                   result = j;
@@ -783,13 +788,12 @@ int ObjectMoleculeGetPrioritizedOther(const int *other, int a1, int a2, int *dou
  */
 int ObjectMoleculeIsAtomBondedToName(ObjectMolecule * obj, int a0, const char *name, int same_res)
 {
-  int a2, s;
   PyMOLGlobals * G = obj->G;
-  AtomInfoType *ai2, *ai0 = obj->AtomInfo + a0;
+  AtomInfoType const* const ai0 = obj->AtomInfo.data() + a0;
 
   if(a0 >= 0) {
-    ITERNEIGHBORATOMS(obj->Neighbor, a0, a2, s) {
-      ai2 = obj->AtomInfo + a2;
+    for (auto const& neighbor : AtomNeighbors(obj, a0)) {
+      auto const* const ai2 = obj->AtomInfo.data() + neighbor.atm;
       if(WordMatchExact(G, LexStr(G, ai2->name), name, true) &&
           (same_res < 0 || (same_res == AtomInfoSameResidue(G, ai0, ai2))))
         return true;
@@ -801,59 +805,34 @@ int ObjectMoleculeIsAtomBondedToName(ObjectMolecule * obj, int a0, const char *n
 int ObjectMoleculeAreAtomsBonded2(ObjectMolecule * obj0, int a0, ObjectMolecule * obj1,
                                   int a1)
 {
-  /* assumes neighbor list is current */
+  if (obj0 == obj1 && a0 >= 0) {
+    assert(a1 >= 0);
+    for (auto const& neighbor : AtomNeighbors(obj0, a0)) {
+      if (a1 == neighbor.atm)
+        return true;
+    }
+  }
+  return false;
+}
 
-  if(obj0 != obj1)
-    return false;
-  else {
-    int a2, s;
-
-    if(a0 >= 0) {
-      s = obj0->Neighbor[a0];
-      s++;                      /* skip count */
-      while(1) {
-        a2 = obj0->Neighbor[s];
-        if(a2 < 0)
-          break;
-        if(a1 == a2)
-          return true;
-        s += 2;
+bool ObjectMoleculeIsAtomBondedToSele(
+    const ObjectMolecule* I, int atm, SelectorID_t sele)
+{
+  if (atm < I->NAtom) {
+    for (auto const& neighbor : AtomNeighbors(I, atm)) {
+      if (SelectorIsMember(I->G, I->AtomInfo[neighbor.atm].selEntry, sele)) {
+        return true;
       }
     }
   }
   return false;
 }
 
-int ObjectMoleculeDoesAtomNeighborSele(ObjectMolecule * I, int index, int sele)
-{
-  int result = false;
-  ObjectMoleculeUpdateNeighbors(I);
-  if(index < I->NAtom) {
-    int a1;
-    int n;
-    AtomInfoType *ai;
-
-    n = I->Neighbor[index] + 1;
-    while(1) {                  /* look for an attached non-hydrogen as a base */
-      a1 = I->Neighbor[n];
-      n += 2;
-      if(a1 < 0)
-        break;
-      ai = I->AtomInfo + a1;
-      if(SelectorIsMember(I->G, ai->selEntry, sele)) {
-        result = true;
-        break;
-      }
-    }
-  }
-  return result;
-}
-
-/*
+/**
  * Based on PDB nomenclature (resn, name), do:
  *
  * 1) If `ai1` or `ai2` is a known charged PDB atom, assign `formalCharge`
- *    and seth `chemFlag` to false
+ *    and set `chemFlag` to false
  *
  * 2) If `ai1` and `ai2` are connected by a double bond, set (*bond_order) = 2
  */
@@ -861,20 +840,19 @@ static void assign_pdb_known_residue(PyMOLGlobals * G, AtomInfoType * ai1,
                                      AtomInfoType * ai2, int *bond_order)
 {
   int order = *(bond_order);
-  const char *name1 = LexStr(G, ai1->name);
-  const char *name2 = LexStr(G, ai2->name);
-  const char *resn1 = LexStr(G, ai1->resn);
+  auto const name1 = pymol::zstring_view(LexStr(G, ai1->name));
+  auto const name2 = pymol::zstring_view(LexStr(G, ai2->name));
+  auto const resn1 = pymol::zstring_view(LexStr(G, ai1->resn));
 
   /* nasty high-speed hack to get bond valences and formal charges 
      for standard residues */
-  if(((!name1[1]) && (!name2[1])) &&
-     (((name1[0] == 'C') && (name2[0] == 'O')) ||
-      ((name1[0] == 'O') && (name2[0] == 'C')))) {
+  if (((name1 == "C" && name2 == "O") || (name2 == "C" && name1 == "O")) &&
+      AtomInfoKnownProteinResName(resn1.c_str())) {
     order = 2;
-  } else if((!name2[1]) && (name2[0] == 'C') && (!strcmp(name1, "OXT"))) {
+  } else if(name2 == "C" && name1 == "OXT") {
     ai1->formalCharge = -1;
     ai1->chemFlag = false;
-  } else if((!name1[1]) && (name1[0] == 'C') && (!strcmp(name2, "OXT"))) {
+  } else if(name1 == "C" && name2 == "OXT") {
     ai2->formalCharge = -1;
     ai2->chemFlag = false;
   } else {
@@ -887,17 +865,17 @@ static void assign_pdb_known_residue(PyMOLGlobals * G, AtomInfoType * ai1,
           switch (resn1[3]) {
           case 0:
           case 'P':            /*  ARG, ARGP */
-            if(!strcmp(name1, "NH1")) {
+            if (name1 == "NH1") {
               ai1->formalCharge = 1;
               ai1->chemFlag = false;
-            } else if(!strcmp(name2, "NH1")) {
+            } else if (name2 == "NH1") {
               ai2->formalCharge = 1;
               ai2->chemFlag = false;
             }
             break;
           }
-          if(((!strcmp(name1, "CZ")) && (!strcmp(name2, "NH1"))) ||
-             ((!strcmp(name2, "CZ")) && (!strcmp(name1, "NH1"))))
+          if((name1 == "CZ" && name2 == "NH1") ||
+             (name2 == "CZ" && name1 == "NH1"))
             order = 2;
           break;
         }
@@ -908,80 +886,76 @@ static void assign_pdb_known_residue(PyMOLGlobals * G, AtomInfoType * ai1,
           switch (resn1[3]) {
           case 0:
           case 'M':            /* ASP, ASPM minus assumption */
-            if(!strcmp(name1, "OD2")) {
+            if (name1 == "OD2") {
               ai1->formalCharge = -1;
               ai1->chemFlag = false;
-            } else if(!strcmp(name2, "OD2")) {
+            } else if (name2 == "OD2") {
               ai2->formalCharge = -1;
               ai2->chemFlag = false;
             }
             break;
           }
-          if(((!strcmp(name1, "CG")) && (!strcmp(name2, "OD1"))) ||
-             ((!strcmp(name2, "CG")) && (!strcmp(name1, "OD1"))))
+          if((name1 == "CG" && name2 == "OD1") ||
+             (name2 == "CG" && name1 == "OD1"))
             order = 2;
           break;
         case 'N':              /* ASN  */
-          if(((!strcmp(name1, "CG")) && (!strcmp(name2, "OD1"))) ||
-             ((!strcmp(name2, "CG")) && (!strcmp(name1, "OD1"))))
+          if((name1 == "CG" && name2 == "OD1") ||
+             (name2 == "CG" && name1 == "OD1"))
             order = 2;
           break;
         }
         break;
       case 0:
-        if(((!strcmp(name1, "O2P")) || (!strcmp(name1, "OP2")))) {
+        if((name1 == "O2P" || name1 == "OP2")) {
           ai1->formalCharge = -1;
           ai1->chemFlag = false;
-        } else if(((!strcmp(name2, "O2P")) || (!strcmp(name2, "OP2")))) {
+        } else if((name2 == "O2P" || name2 == "OP2")) {
           ai2->formalCharge = -1;
           ai2->chemFlag = false;
         }
-        if(((!strcmp(name1, "C8")) && (!strcmp(name2, "N7"))) ||
-           ((!strcmp(name2, "C8")) && (!strcmp(name1, "N7"))))
+        if((name1 == "C8" && name2 == "N7") ||
+           (name2 == "C8" && name1 == "N7"))
           order = 2;
-        else if(((!strcmp(name1, "C4")) && (!strcmp(name2, "C5"))) ||
-                ((!strcmp(name2, "C4")) && (!strcmp(name1, "C5"))))
+        else if((name1 == "C4" && name2 == "C5") ||
+                (name2 == "C4" && name1 == "C5"))
           order = 2;
 
-        else if(((!strcmp(name1, "C6")) && (!strcmp(name2, "N1"))) ||
-                ((!strcmp(name2, "C6")) && (!strcmp(name1, "N1"))))
+        else if((name1 == "C6" && name2 == "N1") ||
+                (name2 == "C6" && name1 == "N1"))
           order = 2;
-        else if(((!strcmp(name1, "C2")) && (!strcmp(name2, "N3"))) ||
-                ((!strcmp(name2, "C2")) && (!strcmp(name1, "N3"))))
+        else if((name1 == "C2" && name2 == "N3") ||
+                (name2 == "C2" && name1 == "N3"))
           order = 2;
         else
-          if(((!strcmp(name1, "P"))
-              && (((!strcmp(name2, "O1P")) || (!strcmp(name2, "OP1")))))
-             || ((!strcmp(name2, "P"))
-                 && (((!strcmp(name1, "O1P")) || (!strcmp(name1, "OP1"))))))
+          if ((name1 == "P" && (name2 == "O1P" || name2 == "OP1")) ||
+              (name2 == "P" && (name1 == "O1P" || name1 == "OP1")))
           order = 2;
         break;
       }
       break;
     case 'C':
       if(resn1[1] == 0) {
-        if(((!strcmp(name1, "O2P")) || (!strcmp(name1, "OP2")))) {
+        if((name1 == "O2P" || name1 == "OP2")) {
           ai1->formalCharge = -1;
           ai1->chemFlag = false;
-        } else if(((!strcmp(name2, "O2P")) || (!strcmp(name2, "OP2")))) {
+        } else if((name2 == "O2P" || name2 == "OP2")) {
           ai2->formalCharge = -1;
           ai2->chemFlag = false;
         }
-        if(((!strcmp(name1, "C2")) && (!strcmp(name2, "O2"))) ||
-           ((!strcmp(name2, "C2")) && (!strcmp(name1, "O2"))))
+        if((name1 == "C2" && name2 == "O2") ||
+           (name2 == "C2" && name1 == "O2"))
           order = 2;
-        else if(((!strcmp(name1, "C4")) && (!strcmp(name2, "N3"))) ||
-                ((!strcmp(name2, "C4")) && (!strcmp(name1, "N3"))))
+        else if((name1 == "C4" && name2 == "N3") ||
+                (name2 == "C4" && name1 == "N3"))
           order = 2;
 
-        else if(((!strcmp(name1, "C5")) && (!strcmp(name2, "C6"))) ||
-                ((!strcmp(name2, "C5")) && (!strcmp(name1, "C6"))))
+        else if((name1 == "C5" && name2 == "C6") ||
+                (name2 == "C5" && name1 == "C6"))
           order = 2;
         else
-          if(((!strcmp(name1, "P"))
-              && (((!strcmp(name2, "O1P")) || (!strcmp(name2, "OP1")))))
-             || ((!strcmp(name2, "P"))
-                 && (((!strcmp(name1, "O1P")) || (!strcmp(name1, "OP1"))))))
+          if ((name1 == "P" && (name2 == "O1P" || name2 == "OP1")) ||
+              (name2 == "P" && (name1 == "O1P" || name1 == "OP1")))
           order = 2;
       }
       break;
@@ -989,140 +963,130 @@ static void assign_pdb_known_residue(PyMOLGlobals * G, AtomInfoType * ai1,
       switch (resn1[1]) {
       case 'A':
         if(resn1[2] == 0) {
-          if(((!strcmp(name1, "O2P")) || (!strcmp(name1, "OP2")))) {
+          if((name1 == "O2P" || name1 == "OP2")) {
             ai1->formalCharge = -1;
             ai1->chemFlag = false;
-          } else if(((!strcmp(name2, "O2P")) || (!strcmp(name2, "OP2")))) {
+          } else if((name2 == "O2P" || name2 == "OP2")) {
             ai2->formalCharge = -1;
             ai2->chemFlag = false;
           }
-          if(((!strcmp(name1, "C8")) && (!strcmp(name2, "N7"))) ||
-             ((!strcmp(name2, "C8")) && (!strcmp(name1, "N7"))))
+          if((name1 == "C8" && name2 == "N7") ||
+             (name2 == "C8" && name1 == "N7"))
             order = 2;
-          else if(((!strcmp(name1, "C4")) && (!strcmp(name2, "C5"))) ||
-                  ((!strcmp(name2, "C4")) && (!strcmp(name1, "C5"))))
+          else if((name1 == "C4" && name2 == "C5") ||
+                  (name2 == "C4" && name1 == "C5"))
             order = 2;
 
-          else if(((!strcmp(name1, "C6")) && (!strcmp(name2, "N1"))) ||
-                  ((!strcmp(name2, "C6")) && (!strcmp(name1, "N1"))))
+          else if((name1 == "C6" && name2 == "N1") ||
+                  (name2 == "C6" && name1 == "N1"))
             order = 2;
-          else if(((!strcmp(name1, "C2")) && (!strcmp(name2, "N3"))) ||
-                  ((!strcmp(name2, "C2")) && (!strcmp(name1, "N3"))))
+          else if((name1 == "C2" && name2 == "N3") ||
+                  (name2 == "C2" && name1 == "N3"))
             order = 2;
           else
-            if(((!strcmp(name1, "P"))
-                && (((!strcmp(name2, "O1P")) || (!strcmp(name2, "OP1")))))
-               || ((!strcmp(name2, "P"))
-                   && (((!strcmp(name1, "O1P")) || (!strcmp(name1, "OP1"))))))
+            if ((name1 == "P" && (name2 == "O1P" || name2 == "OP1")) ||
+                (name2 == "P" && (name1 == "O1P" || name1 == "OP1")))
             order = 2;
         }
         break;
       case 'C':
         if(resn1[2] == 0) {
-          if(((!strcmp(name1, "O2P")) || (!strcmp(name1, "OP2")))) {
+          if((name1 == "O2P" || name1 == "OP2")) {
             ai1->formalCharge = -1;
             ai1->chemFlag = false;
-          } else if(((!strcmp(name2, "O2P")) || (!strcmp(name2, "OP2")))) {
+          } else if((name2 == "O2P" || name2 == "OP2")) {
             ai2->formalCharge = -1;
             ai2->chemFlag = false;
           }
-          if(((!strcmp(name1, "C2")) && (!strcmp(name2, "O2"))) ||
-             ((!strcmp(name2, "C2")) && (!strcmp(name1, "O2"))))
+          if((name1 == "C2" && name2 == "O2") ||
+             (name2 == "C2" && name1 == "O2"))
             order = 2;
-          else if(((!strcmp(name1, "C4")) && (!strcmp(name2, "N3"))) ||
-                  ((!strcmp(name2, "C4")) && (!strcmp(name1, "N3"))))
+          else if((name1 == "C4" && name2 == "N3") ||
+                  (name2 == "C4" && name1 == "N3"))
             order = 2;
 
-          else if(((!strcmp(name1, "C5")) && (!strcmp(name2, "C6"))) ||
-                  ((!strcmp(name2, "C5")) && (!strcmp(name1, "C6"))))
+          else if((name1 == "C5" && name2 == "C6") ||
+                  (name2 == "C5" && name1 == "C6"))
             order = 2;
           else
-            if(((!strcmp(name1, "P"))
-                && (((!strcmp(name2, "O1P")) || (!strcmp(name2, "OP1")))))
-               || ((!strcmp(name2, "P"))
-                   && (((!strcmp(name1, "O1P")) || (!strcmp(name1, "OP1"))))))
+            if ((name1 == "P" && (name2 == "O1P" || name2 == "OP1")) ||
+                (name2 == "P" && (name1 == "O1P" || name1 == "OP1")))
             order = 2;
         }
         break;
       case 'T':
         if(resn1[2] == 0) {
-          if(((!strcmp(name1, "O2P")) || (!strcmp(name1, "OP2"))))
+          if((name1 == "O2P" || name1 == "OP2"))
             ai1->formalCharge = -1;
-          else if(((!strcmp(name2, "O2P")) || (!strcmp(name2, "OP2"))))
+          else if((name2 == "O2P" || name2 == "OP2"))
             ai2->formalCharge = -1;
 
-          if(((!strcmp(name1, "C2")) && (!strcmp(name2, "O2"))) ||
-             ((!strcmp(name2, "C2")) && (!strcmp(name1, "O2"))))
+          if((name1 == "C2" && name2 == "O2") ||
+             (name2 == "C2" && name1 == "O2"))
             order = 2;
-          else if(((!strcmp(name1, "C4")) && (!strcmp(name2, "O4"))) ||
-                  ((!strcmp(name2, "C4")) && (!strcmp(name1, "O4"))))
+          else if((name1 == "C4" && name2 == "O4") ||
+                  (name2 == "C4" && name1 == "O4"))
             order = 2;
 
-          else if(((!strcmp(name1, "C5")) && (!strcmp(name2, "C6"))) ||
-                  ((!strcmp(name2, "C5")) && (!strcmp(name1, "C6"))))
+          else if((name1 == "C5" && name2 == "C6") ||
+                  (name2 == "C5" && name1 == "C6"))
             order = 2;
           else
-            if(((!strcmp(name1, "P"))
-                && (((!strcmp(name2, "O1P")) || (!strcmp(name2, "OP1")))))
-               || ((!strcmp(name2, "P"))
-                   && (((!strcmp(name1, "O1P")) || (!strcmp(name1, "OP1"))))))
+            if ((name1 == "P" && (name2 == "O1P" || name2 == "OP1")) ||
+                (name2 == "P" && (name1 == "O1P" || name1 == "OP1")))
             order = 2;
         }
         break;
       case 'G':
         if(resn1[2] == 0) {
-          if(((!strcmp(name1, "O2P")) || (!strcmp(name1, "OP2")))) {
+          if((name1 == "O2P" || name1 == "OP2")) {
             ai1->formalCharge = -1;
             ai1->chemFlag = false;
-          } else if(((!strcmp(name2, "O2P")) || (!strcmp(name2, "OP2")))) {
+          } else if((name2 == "O2P" || name2 == "OP2")) {
             ai2->formalCharge = -1;
             ai2->chemFlag = false;
           }
-          if(((!strcmp(name1, "C6")) && (!strcmp(name2, "O6"))) ||
-             ((!strcmp(name2, "C6")) && (!strcmp(name1, "O6"))))
+          if((name1 == "C6" && name2 == "O6") ||
+             (name2 == "C6" && name1 == "O6"))
             order = 2;
-          else if(((!strcmp(name1, "C2")) && (!strcmp(name2, "N3"))) ||
-                  ((!strcmp(name2, "C2")) && (!strcmp(name1, "N3"))))
+          else if((name1 == "C2" && name2 == "N3") ||
+                  (name2 == "C2" && name1 == "N3"))
             order = 2;
-          else if(((!strcmp(name1, "C8")) && (!strcmp(name2, "N7"))) ||
-                  ((!strcmp(name2, "C8")) && (!strcmp(name1, "N7"))))
+          else if((name1 == "C8" && name2 == "N7") ||
+                  (name2 == "C8" && name1 == "N7"))
             order = 2;
-          else if(((!strcmp(name1, "C4")) && (!strcmp(name2, "C5"))) ||
-                  ((!strcmp(name2, "C4")) && (!strcmp(name1, "C5"))))
+          else if((name1 == "C4" && name2 == "C5") ||
+                  (name2 == "C4" && name1 == "C5"))
             order = 2;
           else
-            if(((!strcmp(name1, "P"))
-                && (((!strcmp(name2, "O1P")) || (!strcmp(name2, "OP1")))))
-               || ((!strcmp(name2, "P"))
-                   && (((!strcmp(name1, "O1P")) || (!strcmp(name1, "OP1"))))))
+            if ((name1 == "P" && (name2 == "O1P" || name2 == "OP1")) ||
+                (name2 == "P" && (name1 == "O1P" || name1 == "OP1")))
             order = 2;
         }
         break;
       case 'U':
         if(resn1[2] == 0) {
-          if(((!strcmp(name1, "O2P")) || (!strcmp(name1, "OP2")))) {
+          if((name1 == "O2P" || name1 == "OP2")) {
             ai1->formalCharge = -1;
             ai1->chemFlag = false;
-          } else if(((!strcmp(name2, "O2P")) || (!strcmp(name2, "OP2")))) {
+          } else if((name2 == "O2P" || name2 == "OP2")) {
             ai2->formalCharge = -1;
             ai2->chemFlag = false;
           }
 
-          if(((!strcmp(name1, "C2")) && (!strcmp(name2, "O2"))) ||
-             ((!strcmp(name2, "C2")) && (!strcmp(name1, "O2"))))
+          if((name1 == "C2" && name2 == "O2") ||
+             (name2 == "C2" && name1 == "O2"))
             order = 2;
-          else if(((!strcmp(name1, "C4")) && (!strcmp(name2, "O4"))) ||
-                  ((!strcmp(name2, "C4")) && (!strcmp(name1, "O4"))))
+          else if((name1 == "C4" && name2 == "O4") ||
+                  (name2 == "C4" && name1 == "O4"))
             order = 2;
 
-          else if(((!strcmp(name1, "C5")) && (!strcmp(name2, "C6"))) ||
-                  ((!strcmp(name2, "C5")) && (!strcmp(name1, "C6"))))
+          else if((name1 == "C5" && name2 == "C6") ||
+                  (name2 == "C5" && name1 == "C6"))
             order = 2;
           else
-            if(((!strcmp(name1, "P"))
-                && (((!strcmp(name2, "O1P")) || (!strcmp(name2, "OP1")))))
-               || ((!strcmp(name2, "P"))
-                   && (((!strcmp(name1, "O1P")) || (!strcmp(name1, "OP1"))))))
+            if ((name1 == "P" && (name2 == "O1P" || name2 == "OP1")) ||
+                (name2 == "P" && (name1 == "O1P" || name1 == "OP1")))
             order = 2;
         }
         break;
@@ -1136,52 +1100,52 @@ static void assign_pdb_known_residue(PyMOLGlobals * G, AtomInfoType * ai1,
           switch (resn1[3]) {
           case 0:
           case 'M':            /* minus */
-            if(!strcmp(name1, "OE2")) {
+            if (name1 == "OE2") {
               ai1->formalCharge = -1;
               ai1->chemFlag = false;
-            } else if(!strcmp(name2, "OE2")) {
+            } else if (name2 == "OE2") {
               ai2->formalCharge = -1;
               ai2->chemFlag = false;
             }
             break;
           }
-          if(((!strcmp(name1, "CD")) && (!strcmp(name2, "OE1"))) ||
-             ((!strcmp(name2, "CD")) && (!strcmp(name1, "OE1"))))
+          if((name1 == "CD" && name2 == "OE1") ||
+             (name2 == "CD" && name1 == "OE1"))
             order = 2;
           break;
         case 'N':              /* GLN or GLU */
-          if(((!strcmp(name1, "CD")) && (!strcmp(name2, "OE1"))) ||
-             ((!strcmp(name2, "CD")) && (!strcmp(name1, "OE1"))))
+          if((name1 == "CD" && name2 == "OE1") ||
+             (name2 == "CD" && name1 == "OE1"))
             order = 2;
           break;
         }
         break;
       case 0:
-        if(((!strcmp(name1, "O2P")) || (!strcmp(name1, "OP2")))) {
+        if((name1 == "O2P" || name1 == "OP2")) {
           ai1->formalCharge = -1;
           ai1->chemFlag = false;
-        } else if(((!strcmp(name2, "O2P")) || (!strcmp(name2, "OP2")))) {
+        } else if((name2 == "O2P" || name2 == "OP2")) {
           ai2->formalCharge = -1;
           ai2->chemFlag = false;
         }
 
-        if(((!strcmp(name1, "C6")) && (!strcmp(name2, "O6"))) ||
-           ((!strcmp(name2, "C6")) && (!strcmp(name1, "O6"))))
+        if((name1 == "C6" && name2 == "O6") ||
+           (name2 == "C6" && name1 == "O6"))
           order = 2;
-        else if(((!strcmp(name1, "C2")) && (!strcmp(name2, "N3"))) ||
-                ((!strcmp(name2, "C2")) && (!strcmp(name1, "N3"))))
+        else if((name1 == "C2" && name2 == "N3") ||
+                (name2 == "C2" && name1 == "N3"))
           order = 2;
-        else if(((!strcmp(name1, "C8")) && (!strcmp(name2, "N7"))) ||
-                ((!strcmp(name2, "C8")) && (!strcmp(name1, "N7"))))
+        else if((name1 == "C8" && name2 == "N7") ||
+                (name2 == "C8" && name1 == "N7"))
           order = 2;
-        else if(((!strcmp(name1, "C4")) && (!strcmp(name2, "C5"))) ||
-                ((!strcmp(name2, "C4")) && (!strcmp(name1, "C5"))))
+        else if((name1 == "C4" && name2 == "C5") ||
+                (name2 == "C4" && name1 == "C5"))
           order = 2;
         else
-          if(((!strcmp(name1, "P"))
-              && (((!strcmp(name2, "O1P")) || (!strcmp(name2, "OP1")))))
-             || ((!strcmp(name2, "P"))
-                 && (((!strcmp(name1, "O1P")) || (!strcmp(name1, "OP1"))))))
+          if((name1 == "P"
+              && (name2 == "O1P" || name2 == "OP1"))
+             || (name2 == "P"
+                 && (name1 == "O1P" || name1 == "OP1")))
           order = 2;
         break;
       }
@@ -1191,73 +1155,73 @@ static void assign_pdb_known_residue(PyMOLGlobals * G, AtomInfoType * ai1,
       case 'I':
         switch (resn1[2]) {
         case 'P':
-          if(!strcmp(name1, "ND1")) {
+          if (name1 == "ND1") {
             ai1->formalCharge = 1;
             ai1->chemFlag = false;
-          } else if(!strcmp(name2, "ND1")) {
+          } else if (name2 == "ND1") {
             ai2->formalCharge = 1;
             ai2->chemFlag = false;
           }
-          if(((!strcmp(name1, "CG")) && (!strcmp(name2, "CD2"))) ||
-             ((!strcmp(name2, "CG")) && (!strcmp(name1, "CD2"))))
+          if((name1 == "CG" && name2 == "CD2") ||
+             (name2 == "CG" && name1 == "CD2"))
             order = 2;
-          else if(((!strcmp(name1, "CE1")) && (!strcmp(name2, "ND1"))) ||
-                  ((!strcmp(name2, "CE1")) && (!strcmp(name1, "ND1"))))
+          else if((name1 == "CE1" && name2 == "ND1") ||
+                  (name2 == "CE1" && name1 == "ND1"))
             order = 2;
           break;
         case 'S':
           switch (resn1[3]) {
           case 'A':            /* HISA Gromacs */
           case 'D':            /* HISD Quanta */
-            if(((!strcmp(name1, "CG")) && (!strcmp(name2, "CD2"))) ||
-               ((!strcmp(name2, "CG")) && (!strcmp(name1, "CD2"))))
+            if((name1 == "CG" && name2 == "CD2") ||
+               (name2 == "CG" && name1 == "CD2"))
               order = 2;
-            else if(((!strcmp(name1, "CE1")) && (!strcmp(name2, "NE2"))) ||
-                    ((!strcmp(name2, "CE1")) && (!strcmp(name1, "NE2"))))
+            else if((name1 == "CE1" && name2 == "NE2") ||
+                    (name2 == "CE1" && name1 == "NE2"))
               order = 2;
             break;
           case 0:              /* plain HIS */
           case 'B':            /* HISB Gromacs */
           case 'E':            /* HISE Quanta */
-            if(((!strcmp(name1, "CG")) && (!strcmp(name2, "CD2"))) ||
-               ((!strcmp(name2, "CG")) && (!strcmp(name1, "CD2"))))
+            if((name1 == "CG" && name2 == "CD2") ||
+               (name2 == "CG" && name1 == "CD2"))
               order = 2;
-            else if(((!strcmp(name1, "CE1")) && (!strcmp(name2, "ND1"))) ||
-                    ((!strcmp(name2, "CE1")) && (!strcmp(name1, "ND1"))))
+            else if((name1 == "CE1" && name2 == "ND1") ||
+                    (name2 == "CE1" && name1 == "ND1"))
               order = 2;
             break;
           case 'H':            /* HISH Gromacs */
           case 'P':            /* HISP Quanta */
-            if(!strcmp(name1, "ND1")) {
+            if (name1 == "ND1") {
               ai1->formalCharge = 1;
               ai1->chemFlag = false;
-            } else if(!strcmp(name2, "ND1")) {
+            } else if (name2 == "ND1") {
               ai2->formalCharge = 1;
               ai2->chemFlag = false;
             }
-            if(((!strcmp(name1, "CG")) && (!strcmp(name2, "CD2"))) ||
-               ((!strcmp(name2, "CG")) && (!strcmp(name1, "CD2"))))
+            if((name1 == "CG" && name2 == "CD2") ||
+               (name2 == "CG" && name1 == "CD2"))
               order = 2;
-            else if(((!strcmp(name1, "CE1")) && (!strcmp(name2, "ND1"))) ||
-                    ((!strcmp(name2, "CE1")) && (!strcmp(name1, "ND1"))))
+            else if((name1 == "CE1" && name2 == "ND1") ||
+                    (name2 == "CE1" && name1 == "ND1"))
               order = 2;
             break;
           }
           break;
         case 'E':              /* HIE */
-          if(((!strcmp(name1, "CG")) && (!strcmp(name2, "CD2"))) ||
-             ((!strcmp(name2, "CG")) && (!strcmp(name1, "CD2"))))
+          if((name1 == "CG" && name2 == "CD2") ||
+             (name2 == "CG" && name1 == "CD2"))
             order = 2;
-          else if(((!strcmp(name1, "CE1")) && (!strcmp(name2, "ND1"))) ||
-                  ((!strcmp(name2, "CE1")) && (!strcmp(name1, "ND1"))))
+          else if((name1 == "CE1" && name2 == "ND1") ||
+                  (name2 == "CE1" && name1 == "ND1"))
             order = 2;
           break;
         case 'D':              /* HID */
-          if(((!strcmp(name1, "CG")) && (!strcmp(name2, "CD2"))) ||
-             ((!strcmp(name2, "CG")) && (!strcmp(name1, "CD2"))))
+          if((name1 == "CG" && name2 == "CD2") ||
+             (name2 == "CG" && name1 == "CD2"))
             order = 2;
-          else if(((!strcmp(name1, "CE1")) && (!strcmp(name2, "NE2"))) ||
-                  ((!strcmp(name2, "CE1")) && (!strcmp(name1, "NE2"))))
+          else if((name1 == "CE1" && name2 == "NE2") ||
+                  (name2 == "CE1" && name1 == "NE2"))
             order = 2;
           break;
         }
@@ -1266,31 +1230,31 @@ static void assign_pdb_known_residue(PyMOLGlobals * G, AtomInfoType * ai1,
       break;
     case 'I':
       if(resn1[1] == 0) {
-        if(((!strcmp(name1, "O2P")) || (!strcmp(name1, "OP2")))) {
+        if((name1 == "O2P" || name1 == "OP2")) {
           ai1->formalCharge = -1;
           ai1->chemFlag = false;
-        } else if(((!strcmp(name2, "O2P")) || (!strcmp(name2, "OP2")))) {
+        } else if((name2 == "O2P" || name2 == "OP2")) {
           ai2->formalCharge = -1;
           ai2->chemFlag = false;
         }
-        if(((!strcmp(name1, "C8")) && (!strcmp(name2, "N7"))) ||
-           ((!strcmp(name2, "C8")) && (!strcmp(name1, "N7"))))
+        if((name1 == "C8" && name2 == "N7") ||
+           (name2 == "C8" && name1 == "N7"))
           order = 2;
-        else if(((!strcmp(name1, "C4")) && (!strcmp(name2, "C5"))) ||
-                ((!strcmp(name2, "C4")) && (!strcmp(name1, "C5"))))
+        else if((name1 == "C4" && name2 == "C5") ||
+                (name2 == "C4" && name1 == "C5"))
           order = 2;
 
-        else if(((!strcmp(name1, "C6")) && (!strcmp(name2, "N1"))) ||
-                ((!strcmp(name2, "C6")) && (!strcmp(name1, "N1"))))
+        else if((name1 == "C6" && name2 == "N1") ||
+                (name2 == "C6" && name1 == "N1"))
           order = 2;
-        else if(((!strcmp(name1, "C2")) && (!strcmp(name2, "N3"))) ||
-                ((!strcmp(name2, "C2")) && (!strcmp(name1, "N3"))))
+        else if((name1 == "C2" && name2 == "N3") ||
+                (name2 == "C2" && name1 == "N3"))
           order = 2;
         else
-          if(((!strcmp(name1, "P"))
-              && (((!strcmp(name2, "O1P")) || (!strcmp(name2, "OP1")))))
-             || ((!strcmp(name2, "P"))
-                 && (((!strcmp(name1, "O1P")) || (!strcmp(name1, "OP1"))))))
+          if((name1 == "P"
+              && (name2 == "O1P" || name2 == "OP1"))
+             || (name2 == "P"
+                 && (name1 == "O1P" || name1 == "OP1")))
           order = 2;
       }
       break;
@@ -1298,15 +1262,15 @@ static void assign_pdb_known_residue(PyMOLGlobals * G, AtomInfoType * ai1,
       switch (resn1[1]) {
       case 'H':                /* PHE */
         if(resn1[2] == 'E') {
-          if(((!strcmp(name1, "CG")) && (!strcmp(name2, "CD1"))) ||
-             ((!strcmp(name2, "CG")) && (!strcmp(name1, "CD1"))))
+          if((name1 == "CG" && name2 == "CD1") ||
+             (name2 == "CG" && name1 == "CD1"))
             order = 2;
-          else if(((!strcmp(name1, "CZ")) && (!strcmp(name2, "CE1"))) ||
-                  ((!strcmp(name2, "CZ")) && (!strcmp(name1, "CE1"))))
+          else if((name1 == "CZ" && name2 == "CE1") ||
+                  (name2 == "CZ" && name1 == "CE1"))
             order = 2;
 
-          else if(((!strcmp(name1, "CE2")) && (!strcmp(name2, "CD2"))) ||
-                  ((!strcmp(name2, "CE2")) && (!strcmp(name1, "CD2"))))
+          else if((name1 == "CE2" && name2 == "CD2") ||
+                  (name2 == "CE2" && name1 == "CD2"))
             order = 2;
           break;
         }
@@ -1320,10 +1284,10 @@ static void assign_pdb_known_residue(PyMOLGlobals * G, AtomInfoType * ai1,
           switch (resn1[3]) {
           case 0:
           case 'P':            /* LYS, LYSP */
-            if(!strcmp(name1, "NZ")) {
+            if (name1 == "NZ") {
               ai1->formalCharge = 1;
               ai1->chemFlag = false;
-            } else if(!strcmp(name2, "NZ")) {
+            } else if (name2 == "NZ") {
               ai2->formalCharge = 1;
               ai2->chemFlag = false;
             }
@@ -1338,88 +1302,84 @@ static void assign_pdb_known_residue(PyMOLGlobals * G, AtomInfoType * ai1,
       switch (resn1[1]) {
       case 'Y':                /* TYR */
         if(resn1[2] == 'R') {
-          if(((!strcmp(name1, "CG")) && (!strcmp(name2, "CD1"))) ||
-             ((!strcmp(name2, "CG")) && (!strcmp(name1, "CD1"))))
+          if((name1 == "CG" && name2 == "CD1") ||
+             (name2 == "CG" && name1 == "CD1"))
             order = 2;
-          else if(((!strcmp(name1, "CZ")) && (!strcmp(name2, "CE1"))) ||
-                  ((!strcmp(name2, "CZ")) && (!strcmp(name1, "CE1"))))
+          else if((name1 == "CZ" && name2 == "CE1") ||
+                  (name2 == "CZ" && name1 == "CE1"))
             order = 2;
 
-          else if(((!strcmp(name1, "CE2")) && (!strcmp(name2, "CD2"))) ||
-                  ((!strcmp(name2, "CE2")) && (!strcmp(name1, "CD2"))))
+          else if((name1 == "CE2" && name2 == "CD2") ||
+                  (name2 == "CE2" && name1 == "CD2"))
             order = 2;
           break;
         }
         break;
       case 'R':
         if(resn1[2] == 'P') {
-          if(((!strcmp(name1, "CG")) && (!strcmp(name2, "CD1"))) ||
-             ((!strcmp(name2, "CG")) && (!strcmp(name1, "CD1"))))
+          if((name1 == "CG" && name2 == "CD1") ||
+             (name2 == "CG" && name1 == "CD1"))
             order = 2;
-          else if(((!strcmp(name1, "CZ3")) && (!strcmp(name2, "CE3"))) ||
-                  ((!strcmp(name2, "CZ3")) && (!strcmp(name1, "CE3"))))
+          else if((name1 == "CZ3" && name2 == "CE3") ||
+                  (name2 == "CZ3" && name1 == "CE3"))
             order = 2;
-          else if(((!strcmp(name1, "CZ2")) && (!strcmp(name2, "CH2"))) ||
-                  ((!strcmp(name2, "CZ2")) && (!strcmp(name1, "CH2"))))
+          else if((name1 == "CZ2" && name2 == "CH2") ||
+                  (name2 == "CZ2" && name1 == "CH2"))
             order = 2;
-          else if(((!strcmp(name1, "CE2")) && (!strcmp(name2, "CD2"))) ||
-                  ((!strcmp(name2, "CE2")) && (!strcmp(name1, "CD2"))))
+          else if((name1 == "CE2" && name2 == "CD2") ||
+                  (name2 == "CE2" && name1 == "CD2"))
             order = 2;
           break;
         }
         break;
       case 0:
-        if(((!strcmp(name1, "O2P")) || (!strcmp(name1, "OP2")))) {
+        if((name1 == "O2P" || name1 == "OP2")) {
           ai1->formalCharge = -1;
           ai1->chemFlag = false;
-        } else if(((!strcmp(name2, "O2P")) || (!strcmp(name2, "OP2")))) {
+        } else if((name2 == "O2P" || name2 == "OP2")) {
           ai2->formalCharge = -1;
           ai2->chemFlag = false;
         }
 
-        if(((!strcmp(name1, "C2")) && (!strcmp(name2, "O2"))) ||
-           ((!strcmp(name2, "C2")) && (!strcmp(name1, "O2"))))
+        if((name1 == "C2" && name2 == "O2") ||
+           (name2 == "C2" && name1 == "O2"))
           order = 2;
-        else if(((!strcmp(name1, "C4")) && (!strcmp(name2, "O4"))) ||
-                ((!strcmp(name2, "C4")) && (!strcmp(name1, "O4"))))
+        else if((name1 == "C4" && name2 == "O4") ||
+                (name2 == "C4" && name1 == "O4"))
           order = 2;
 
-        else if(((!strcmp(name1, "C5")) && (!strcmp(name2, "C6"))) ||
-                ((!strcmp(name2, "C5")) && (!strcmp(name1, "C6"))))
+        else if((name1 == "C5" && name2 == "C6") ||
+                (name2 == "C5" && name1 == "C6"))
           order = 2;
         else
-          if(((!strcmp(name1, "P"))
-              && (((!strcmp(name2, "O1P")) || (!strcmp(name2, "OP1")))))
-             || ((!strcmp(name2, "P"))
-                 && (((!strcmp(name1, "O1P")) || (!strcmp(name1, "OP1"))))))
+          if ((name1 == "P" && (name2 == "O1P" || name2 == "OP1")) ||
+              (name2 == "P" && (name1 == "O1P" || name1 == "OP1")))
           order = 2;
         break;
       }
       break;
     case 'U':
       if(resn1[1] == 0) {
-        if(((!strcmp(name1, "O2P")) || (!strcmp(name1, "OP2")))) {
+        if((name1 == "O2P" || name1 == "OP2")) {
           ai1->formalCharge = -1;
           ai1->chemFlag = false;
-        } else if(((!strcmp(name2, "O2P")) || (!strcmp(name2, "OP2")))) {
+        } else if((name2 == "O2P" || name2 == "OP2")) {
           ai2->formalCharge = -1;
           ai2->chemFlag = false;
         }
-        if(((!strcmp(name1, "C2")) && (!strcmp(name2, "O2"))) ||
-           ((!strcmp(name2, "C2")) && (!strcmp(name1, "O2"))))
+        if((name1 == "C2" && name2 == "O2") ||
+           (name2 == "C2" && name1 == "O2"))
           order = 2;
-        else if(((!strcmp(name1, "C4")) && (!strcmp(name2, "O4"))) ||
-                ((!strcmp(name2, "C4")) && (!strcmp(name1, "O4"))))
+        else if((name1 == "C4" && name2 == "O4") ||
+                (name2 == "C4" && name1 == "O4"))
           order = 2;
 
-        else if(((!strcmp(name1, "C5")) && (!strcmp(name2, "C6"))) ||
-                ((!strcmp(name2, "C5")) && (!strcmp(name1, "C6"))))
+        else if((name1 == "C5" && name2 == "C6") ||
+                (name2 == "C5" && name1 == "C6"))
           order = 2;
         else
-          if(((!strcmp(name1, "P"))
-              && (((!strcmp(name2, "O1P")) || (!strcmp(name2, "OP1")))))
-             || ((!strcmp(name2, "P"))
-                 && (((!strcmp(name1, "O1P")) || (!strcmp(name1, "OP1"))))))
+          if ((name1 == "P" && (name2 == "O1P" || name2 == "OP1")) ||
+              (name2 == "P" && (name1 == "O1P" || name1 == "OP1")))
           order = 2;
       }
       break;
@@ -1591,7 +1551,7 @@ static int get_multi_object_status(const char *p)
   return -1;
 }
 
-/*
+/**
  * If any atom in I->AtomInfo contains the wildcard character (from
  * "atom_name_wildcard" or "wildcard" setting), then set the object-level
  * "atom_name_wildcard" setting to " " (disables wildcard matching).
@@ -1603,11 +1563,11 @@ int ObjectMoleculeAutoDisableAtomNameWildcard(ObjectMolecule * I)
   int found_wildcard = false;
 
   {
-    const char *tmp = SettingGet_s(G, NULL, I->Setting, cSetting_atom_name_wildcard);
+    const char *tmp = SettingGet_s(G, NULL, I->Setting.get(), cSetting_atom_name_wildcard);
     if(tmp && tmp[0]) {
       wildcard = *tmp;
     } else {
-      tmp = SettingGet_s(G, NULL, I->Setting, cSetting_wildcard);
+      tmp = SettingGet_s(G, NULL, I->Setting.get(), cSetting_wildcard);
       if(tmp) {
         wildcard = *tmp;
       }
@@ -1712,14 +1672,14 @@ static void ObjectMoleculePDBStr2CoordSetPASS1(PyMOLGlobals * G, int *ok,
   }
 }
 
-/*
+/**
  * Datastructure for efficient array-based secondary structure lookup.
  */
-typedef struct {
+struct SSHash {
   int n_ss;         // number of ss_list items
   int* ss[256];     // one array for each chain identifier
   SSEntry *ss_list; // VLA
-} SSHash;
+};
 
 static void sshash_free(SSHash *hash) {
   int a;
@@ -1743,7 +1703,7 @@ ok_except1:
   return NULL;
 }
 
-/*
+/**
  * Insert a secondary structure record into the hash table.
  */
 static int sshash_register_rec(SSHash * hash,
@@ -1803,7 +1763,7 @@ ok_except1:
   return false;
 }
 
-/*
+/**
  * Assign ai->ssType
  */
 static void sshash_lookup(SSHash *hash, AtomInfoType *ai, unsigned char ss_chain1) {
@@ -1829,7 +1789,7 @@ static void sshash_lookup(SSHash *hash, AtomInfoType *ai, unsigned char ss_chain
   }
 }
 
-/*
+/**
  * PQR atom line parsing
  *
  * Try to parse columns white space delimited (10 columns with optional
@@ -1925,7 +1885,7 @@ CoordSet *ObjectMoleculePDBStr2CoordSet(PyMOLGlobals * G,
   int *idx;
   int nBond = 0;
   int b1, b2, nReal, maxAt;
-  CSymmetry *symmetry = NULL;
+  std::unique_ptr<CSymmetry> symmetry;
   int auto_show = RepGetAutoShowMask(G);
   int reformat_names = SettingGetGlobal_i(G, cSetting_pdb_reformat_names_mode);
   int truncate_resn = SettingGetGlobal_b(G, cSetting_pdb_truncate_residue_name);
@@ -2212,7 +2172,7 @@ CoordSet *ObjectMoleculePDBStr2CoordSet(PyMOLGlobals * G,
       }
     } else if(strstartswith(p, "CRYST1") && (!*restart_model)) {
       if(!symmetry){
-        symmetry = new CSymmetry(G);
+        symmetry.reset(new CSymmetry(G));
 	CHECKOK(ok, symmetry);
       }
       if(symmetry) {
@@ -2221,34 +2181,41 @@ CoordSet *ObjectMoleculePDBStr2CoordSet(PyMOLGlobals * G,
           " PDBStrToCoordSet: Attempting to read symmetry information\n" ENDFB(G);
         p = nskip(p, 6);
         symFlag = true;
+        float cellparams[3];
         p = ncopy(cc, p, 9);
-        if(sscanf(cc, "%f", &symmetry->Crystal.Dim[0]) != 1)
-          symFlag = false;
-        p = ncopy(cc, p, 9);
-        if(sscanf(cc, "%f", &symmetry->Crystal.Dim[1]) != 1)
+        if(sscanf(cc, "%f", cellparams + 0) != 1)
           symFlag = false;
         p = ncopy(cc, p, 9);
-        if(sscanf(cc, "%f", &symmetry->Crystal.Dim[2]) != 1)
+        if(sscanf(cc, "%f", cellparams + 1) != 1)
+          symFlag = false;
+        p = ncopy(cc, p, 9);
+        if(sscanf(cc, "%f", cellparams + 2) != 1)
+          symFlag = false;
+
+        symmetry->Crystal.setDims(cellparams);
+
+        p = ncopy(cc, p, 7);
+        if(sscanf(cc, "%f", cellparams + 0) != 1)
           symFlag = false;
         p = ncopy(cc, p, 7);
-        if(sscanf(cc, "%f", &symmetry->Crystal.Angle[0]) != 1)
+        if(sscanf(cc, "%f", cellparams + 1) != 1)
           symFlag = false;
         p = ncopy(cc, p, 7);
-        if(sscanf(cc, "%f", &symmetry->Crystal.Angle[1]) != 1)
+        if(sscanf(cc, "%f", cellparams + 2) != 1)
           symFlag = false;
-        p = ncopy(cc, p, 7);
-        if(sscanf(cc, "%f", &symmetry->Crystal.Angle[2]) != 1)
-          symFlag = false;
+
+        symmetry->Crystal.setAngles(cellparams);
+
         p = nskip(p, 1);
-        p = ncopy(symmetry->SpaceGroup, p, 11);
-        UtilCleanStr(symmetry->SpaceGroup);
+        p = ncopy(cc, p, 11);
+        UtilCleanStr(cc);
+        symmetry->setSpaceGroup(cc);
         p = ncopy(cc, p, 3);
         if(sscanf(cc, "%d", &symmetry->PDBZValue) != 1)
           symmetry->PDBZValue = 1;
         if(!symFlag) {
           ErrMessage(G, "PDBStrToCoordSet", "Error reading CRYST1 record\n");
-          SymmetryFree(symmetry);
-          symmetry = NULL;
+          symmetry.reset();
         }
       }
     } else if(strstartswith(p, "SCALE") && (!*restart_model) && info) { /* SCALEn */
@@ -2303,12 +2270,10 @@ CoordSet *ObjectMoleculePDBStr2CoordSet(PyMOLGlobals * G,
 		  bond[nBond].index[0] = b1;      /* temporarily store the atom indexes */
 		  bond[nBond].index[1] = b2;
 		  bond[nBond].order = 1;
-		  bond[nBond].stereo = 0;
 		} else {
 		  bond[nBond].index[0] = b2;
 		  bond[nBond].index[1] = b1;
 		  bond[nBond].order = 1;
-		  bond[nBond].stereo = 0;
 		}
 		nBond++;
 	      }
@@ -2636,7 +2601,6 @@ pqr_done:
             ii1->index[0] = ii2->index[0];
             ii1->index[1] = ii2->index[1];
             ii1->order = ii2->order;
-            ii1->stereo = ii2->stereo;
             nReal++;
           }
           ii2++;
@@ -2741,8 +2705,7 @@ pqr_done:
     cset->Coord = pymol::vla_take_ownership(coord);
     cset->TmpBond = pymol::vla_take_ownership(bond);
     cset->NTmpBond = nBond;
-    if(symmetry)
-      cset->Symmetry = std::unique_ptr<CSymmetry>(symmetry);
+    cset->Symmetry = std::move(symmetry);
     if(atInfoPtr)
       *atInfoPtr = atInfo;
     
@@ -2768,7 +2731,7 @@ pqr_done:
   }
   if (!ok){
     if (cset){
-      cset->fFree();
+      delete cset;
       cset = NULL;
     } else {
       VLAFreeP(coord);
@@ -2882,48 +2845,24 @@ static int ObjectMoleculeFindBestDonorH(ObjectMolecule * I,
 {
   int result = 0;
   CoordSet *cs;
-  int n, nn;
-  int idx;
-  int a1;
   float cand[3], cand_dir[3];
   float best_dot = 0.0F, cand_dot;
-  float *orig;
-
-  ObjectMoleculeUpdateNeighbors(I);
 
   if((state >= 0) && (state < I->NCSet) && (cs = I->CSet[state]) && (atom < I->NAtom)) {
 
-    if(I->DiscreteFlag) {
-      if(cs == I->DiscreteCSet[atom]) {
-        idx = I->DiscreteAtmToIdx[atom];
-      } else {
-        idx = -1;
-      }
-    } else {
-      idx = cs->AtmToIdx[atom];
-    }
+    auto idx = cs->atmToIdx(atom);
 
     if(idx >= 0) {
 
-      orig = cs->Coord + 3 * idx;
+      const float* orig = cs->coordPtr(idx);
 
       /*  do we need to add any new hydrogens? */
 
-      n = I->Neighbor[atom];
-      nn = I->Neighbor[n++];
-
-      /*      printf("nn %d valence %d %s\n",nn,
-         I->AtomInfo[atom].valence,I->AtomInfo[atom].name);
-         {
-         int i;
-         for(i=0;i<nn;i++) {
-         printf("%d \n",I->Neighbor[n+2*i]);
-         }
-         }
-       */
+      auto const neighbors = AtomNeighbors(I, atom);
+      int const nn = neighbors.size();
 
       if((nn < I->AtomInfo[atom].valence) || I->AtomInfo[atom].hb_donor) {      /* is there an implicit hydrogen? */
-        if(ObjectMoleculeFindOpenValenceVector(I, state, atom, best, dir, -1)) {
+        if (CoordSetFindOpenValenceVector(cs, atom, best, dir)) {
           result = true;
           best_dot = dot_product3f(best, dir);
           add3f(orig, best, best);
@@ -2934,11 +2873,9 @@ static int ObjectMoleculeFindBestDonorH(ObjectMolecule * I,
       /* iterate through real hydrogens looking for best match
          with desired direction */
 
-      while(1) {                /* look for an attached non-hydrogen as a base */
-        a1 = I->Neighbor[n];
-        n += 2;
-        if(a1 < 0)
-          break;
+      /* look for an attached non-hydrogen as a base */
+      for (int i = 0; i < nn; ++i) {
+        int const a1 = neighbors[i].atm;
         if(I->AtomInfo[a1].protons == 1) {      /* hydrogen */
           if(ObjectMoleculeGetAtomVertex(I, state, a1, cand)) { /* present */
 
@@ -2981,9 +2918,7 @@ int ObjectMoleculeGetCheckHBond(AtomInfoType **h_real,
 				HBondCriteria * hbc)
 {
   int result = 0;
-  CoordSet *csD, *csA;
-  int idxD, idxA;
-  float *vAcc, *vDon;
+  const CoordSet *csD, *csA;
   float donToAcc[3];
   float donToH[3];
   float bestH[3];
@@ -3002,33 +2937,16 @@ int ObjectMoleculeGetCheckHBond(AtomInfoType **h_real,
 
     /* now check for coordinates of these actual atoms */
 
-    if(don_obj->DiscreteFlag) {
-      if(csD == don_obj->DiscreteCSet[don_atom]) {
-        idxD = don_obj->DiscreteAtmToIdx[don_atom];
-      } else {
-        idxD = -1;
-      }
-    } else {
-      idxD = csD->AtmToIdx[don_atom];
-    }
-
-    if(acc_obj->DiscreteFlag) {
-      if(csA == acc_obj->DiscreteCSet[acc_atom]) {
-        idxA = acc_obj->DiscreteAtmToIdx[acc_atom];
-      } else {
-        idxA = -1;
-      }
-    } else {
-      idxA = csA->AtmToIdx[acc_atom];
-    }
+    auto idxD = csD->atmToIdx(don_atom);
+    auto idxA = csA->atmToIdx(acc_atom);
 
     if((idxA >= 0) && (idxD >= 0)) {
 
       /* now get local geometries, including 
          real or virtual hydrogen atom positions */
 
-      vDon = csD->Coord + 3 * idxD;
-      vAcc = csA->Coord + 3 * idxA;
+      const float* vDon = csD->coordPtr(idxD);
+      const float* vAcc = csA->coordPtr(idxA);
 
       subtract3f(vAcc, vDon, donToAcc);
 
@@ -3150,14 +3068,18 @@ static PyObject *ObjectMoleculeBondAsPyList(ObjectMolecule * I)
   result = PyList_New(I->NBond);
   bond = I->Bond;
   for(a = 0; a < I->NBond; a++) {
-    bond_list = PyList_New(7);
+    size_t const list_size = bond->hasSymOp() ? 8 : 7;
+    bond_list = PyList_New(list_size);
     PyList_SetItem(bond_list, 0, PyInt_FromLong(bond->index[0]));
     PyList_SetItem(bond_list, 1, PyInt_FromLong(bond->index[1]));
     PyList_SetItem(bond_list, 2, PyInt_FromLong(bond->order));
-    PyList_SetItem(bond_list, 3, PyInt_FromLong(bond->id));
-    PyList_SetItem(bond_list, 4, PyInt_FromLong(bond->stereo));
+    PyList_SetItem(bond_list, 3, PyInt_FromLong(-1)); // id
+    PyList_SetItem(bond_list, 4, PyInt_FromLong(0));  // stereo
     PyList_SetItem(bond_list, 5, PyInt_FromLong(bond->unique_id));
     PyList_SetItem(bond_list, 6, PyInt_FromLong(bond->has_setting));
+    if (list_size > 7) {
+      PyList_SetItem(bond_list, 7, PConvToPyObject(bond->symop_2));
+    }
     PyList_SetItem(result, a, bond_list);
     bond++;
   }
@@ -3181,7 +3103,7 @@ static int ObjectMoleculeBondFromPyList(ObjectMolecule * I, PyObject * list)
 
   bool pse_binary_dump = false;
 
-  if (ll == 2){
+  if (ll >= 2) {
     // checking if from pse_binary_dump
     // pse_binary_dump saves 2 values: bondInfo_version, BondType binary
     CPythonVal *val1 = CPythonVal_PyList_GetItem(G, list, 1);
@@ -3222,12 +3144,6 @@ static int ObjectMoleculeBondFromPyList(ObjectMolecule * I, PyObject * list)
     if(ok)
       if((ok = CPythonVal_PConvPyIntToInt_From_List(I->G, bond_list, 2, &stereo)))
         bond->order = stereo;
-    if(ok)
-      ok = PConvPyIntToInt(PyList_GetItem(bond_list, 3), &bond->id);
-    if(ok)
-      ok = PConvPyIntToInt(PyList_GetItem(bond_list, 4), &stereo);
-    if(ok)
-      bond->stereo = (short int) stereo;
     if(ok && (ll > 5)) {
       int has_setting;
       if(ok)
@@ -3240,7 +3156,11 @@ static int ObjectMoleculeBondFromPyList(ObjectMolecule * I, PyObject * list)
         bond->unique_id = SettingUniqueConvertOldSessionID(G, bond->unique_id);
       }
     }
+      if (ll > 7) {
+        PConvFromPyListItem(G, bond_list, 7, bond->symop_2);
+      }
     bond++;
+      CPythonVal_Free(bond_list);
   }
   }
   PRINTFB(G, FB_ObjectMolecule, FB_Debugging)
@@ -3248,6 +3168,82 @@ static int ObjectMoleculeBondFromPyList(ObjectMolecule * I, PyObject * list)
 
   return (ok);
 }
+
+#ifdef _PYMOL_IP_PROPERTIES
+/**
+ * Extract an atom property "column" as a Python list.
+ *
+ * As an optimization, trailing None values are removed, so the returned list
+ * may be shorter than the atom array or even be empty.
+ *
+ * @param mol Object molecule which provides the atom array
+ * @param func Function which extracts a property from an atom
+ * @return List of properties
+ */
+static PyObject* AtomColumnAsPyList(const ObjectMolecule& mol,
+    std::function<PyObject*(const AtomInfoType&)> func)
+{
+  auto list = PyList_New(mol.NAtom);
+  PyObject* prev = Py_None;
+  int pruned_size = 0;
+
+  for (int i = 0; i < mol.NAtom; ++i) {
+    PyObject* value = func(mol.AtomInfo[i]);
+
+#ifndef PICKLETOOLS
+    // Simple optimization: Repeated property lists will reference the same
+    // Python object
+    if (prev != value && PyObject_RichCompareBool(prev, value, Py_EQ)) {
+      Py_INCREF(prev);
+      Py_DECREF(value);
+      value = prev;
+    } else {
+      prev = value;
+    }
+
+    if (value != Py_None) {
+      pruned_size = i + 1;
+    }
+#endif
+
+    PyList_SetItem(list, i, value);
+  }
+
+#ifndef PICKLETOOLS
+  assert(pruned_size <= mol.NAtom);
+
+  // Simple optimization: Prune "None" tail
+  PyList_SetSlice(list, pruned_size, mol.NAtom, nullptr);
+
+  assert(PyList_Size(list) == pruned_size);
+#endif
+
+  return list;
+}
+#endif
+
+#ifdef _PYMOL_IP_PROPERTIES
+/**
+ * Restore an atom property "column" from a Python list.
+ * @param mol Object molecule to update atoms in
+ * @param list Property list (may be shorter than atom array)
+ * @param func Function which sets a property for an atom
+ */
+static void AtomColumnFromPyList(ObjectMolecule& mol, PyObject* list,
+    std::function<void(AtomInfoType&, PyObject*)> func)
+{
+  if (!list || !PyList_Check(list)) {
+    return;
+  }
+
+  int size = PyList_Size(list);
+  assert(size <= mol.NAtom);
+
+  for (int i = 0; i < size; ++i) {
+    func(mol.AtomInfo[i], PyList_GetItem(list, i));
+  }
+}
+#endif
 
 static PyObject *ObjectMoleculeAtomAsPyList(ObjectMolecule * I)
 {
@@ -3307,10 +3303,30 @@ static PyObject *ObjectMoleculeAtomAsPyList(ObjectMolecule * I)
     auto blob = converter.allocCopy(version, I->AtomInfo);
     auto blobsize = VLAGetByteSize(blob);
 
-    result = PyList_New(3);
+    // PyMOL versions up to 2.3.5 can only restore list size 3
+    size_t result_size = 3;
+
+    // Atom properties (not binary)
+    PyObject* prop_list = nullptr;
+#ifdef _PYMOL_IP_PROPERTIES
+    if (pse_export_version > 2399) {
+      prop_list = AtomColumnAsPyList(*I, [G](const AtomInfoType& atom) {
+        return PConvAutoNone(
+            atom.prop_id ? PropertyAsPyList(G, atom.prop_id, true) : nullptr);
+      });
+
+      result_size = 4;
+    }
+#endif
+
+    result = PyList_New(result_size);
     PyList_SetItem(result, 0, PyInt_FromLong(version));
     PyList_SetItem(result, 1, PyBytes_FromStringAndSize(reinterpret_cast<const char*>(blob), blobsize));
     PyList_SetItem(result, 2, PyBytes_FromStringAndSize(reinterpret_cast<const char*>(strinfo), strinfolen));
+
+    if (result_size > 3) {
+      PyList_SetItem(result, 3, PConvAutoNone(prop_list));
+    }
 
     VLAFreeP(blob);
     FreeP(strinfo);
@@ -3340,7 +3356,7 @@ static int ObjectMoleculeAtomFromPyList(ObjectMolecule * I, PyObject * list)
 
   bool pse_binary_dump = false;
 
-  if (ll == 3){
+  if (ll >= 3) {
     // checking if from pse_binary_dump
     // pse_binary_dump saves 3 values: atomInfo_version, AtomInfo binary, and strings array
     CPythonVal *val1 = CPythonVal_PyList_GetItem(G, list, 1);
@@ -3398,6 +3414,18 @@ static int ObjectMoleculeAtomFromPyList(ObjectMolecule * I, PyObject * list)
     CPythonVal_Free(verobj);
     CPythonVal_Free(strobj);
     CPythonVal_Free(strlookupobj);
+
+#ifdef _PYMOL_IP_PROPERTIES
+    if (ll > 3) {
+      // Restore atom properties
+      AtomColumnFromPyList(*I, PyList_GetItem(list, 3), //
+          [G](AtomInfoType& atom, PyObject* value) {
+            assert(atom.prop_id == 0);
+            atom.prop_id = PropertyFromPyList(G, value);
+          });
+    }
+#endif
+
   } else {
     // The old slow way of loading in AtomInfo, using python lists
     if (ok)
@@ -3452,16 +3480,27 @@ int ObjectMoleculeNewFromPyList(PyMOLGlobals * G, PyObject * list,
     if(I->CSTmpl)
       I->CSTmpl->Obj = I;
   }
-  if(ok)
-    ok = ObjectMoleculeBondFromPyList(I, PyList_GetItem(list, 6));
-  if(ok)
-    ok = ObjectMoleculeAtomFromPyList(I, PyList_GetItem(list, 7));
-  if(ok)
-    I->Symmetry = SymmetryNewFromPyList(G, PyList_GetItem(list, 10));
-  if(ok)
-    ok = PConvPyIntToInt(PyList_GetItem(list, 11), &I->CurCSet);
-  if(ok)
-    ok = PConvPyIntToInt(PyList_GetItem(list, 12), &I->BondCounter);
+  if(ok){
+    CPythonVal *val = CPythonVal_PyList_GetItem(G, list, 6);
+    ok = ObjectMoleculeBondFromPyList(I, val);
+    CPythonVal_Free(val);
+  }
+  if (!ok && I)
+    I->NBond = 0;
+  if(ok){
+    CPythonVal *val = CPythonVal_PyList_GetItem(G, list, 7);
+    ok = ObjectMoleculeAtomFromPyList(I, val);
+    CPythonVal_Free(val);
+  }
+  if (!ok && I)
+    I->NAtom = 0;
+  if(ok){
+    CPythonVal *val = CPythonVal_PyList_GetItem(G, list, 10);
+    I->Symmetry.reset(SymmetryNewFromPyList(G, val));
+    CPythonVal_Free(val);
+  }
+  /* 11 was CurCSet */
+  /* 12 was BondCounter */
   if(ok)
     ok = PConvPyIntToInt(PyList_GetItem(list, 13), &I->AtomCounter);
 
@@ -3499,9 +3538,9 @@ PyObject *ObjectMoleculeAsPyList(ObjectMolecule * I)
   PyList_SetItem(result, 7, ObjectMoleculeAtomAsPyList(I));
   PyList_SetItem(result, 8, PyInt_FromLong(I->DiscreteFlag));
   PyList_SetItem(result, 9, PyInt_FromLong(I->DiscreteFlag ? I->NAtom : 0 /* NDiscrete */));
-  PyList_SetItem(result, 10, SymmetryAsPyList(I->Symmetry));
-  PyList_SetItem(result, 11, PyInt_FromLong(I->CurCSet));
-  PyList_SetItem(result, 12, PyInt_FromLong(I->BondCounter));
+  PyList_SetItem(result, 10, SymmetryAsPyList(I->Symmetry.get()));
+  PyList_SetItem(result, 11, PyInt_FromLong(0 /* CurCSet */));
+  PyList_SetItem(result, 12, PyInt_FromLong(-1 /* BondCounter */));
   PyList_SetItem(result, 13, PyInt_FromLong(I->AtomCounter));
 
   float pse_export_version = SettingGetGlobal_f(I->G, cSetting_pse_export_version);
@@ -3559,7 +3598,7 @@ float connect_cutoff_adjustment(
   return 0.f;
 }
 
-/*
+/**
  * True if two atoms should be bonded
  */
 static
@@ -3577,6 +3616,10 @@ bool is_distance_bonded(
     bool unbond_cations)
 {
   auto dst = (float) diff3f(v1, v2);
+
+  if (dst < R_SMALL4)
+    return false;
+
   dst -= (ai1->vdw + ai2->vdw) / 2;
 
   cutoff += connect_cutoff_adjustment(ai1, ai2);
@@ -3634,6 +3677,7 @@ bool is_distance_bonded(
  * @param bondSearchMode If false and `connect_mode` != 2, do not search for new
  * bonds (only use TmpBond/TmpLinkBond).
  * @param connectModeOverride Overrides `connect_mode` setting if not -1
+ * @param pbc Use periodic boundary conditions (find symop bonds)
  *
  * `connect_mode` options:
  * 0 = distance-based (excluding HETATM to HETATM) and CONECT records (default)
@@ -3643,49 +3687,32 @@ bool is_distance_bonded(
  * 4 = same as `connect_mode` = 0 (special meaning during mmCIF loading)
  */
 bool ObjectMoleculeConnect(ObjectMolecule* I, CoordSet* cs, bool bondSearchMode,
-    int connectModeOverride)
+    int connectModeOverride, bool pbc)
 {
   return ObjectMoleculeConnect(
-      I, I->NBond, I->Bond, cs, bondSearchMode, connectModeOverride);
+      I, I->NBond, I->Bond, cs, bondSearchMode, connectModeOverride, pbc);
 }
 
 /*========================================================================*/
 bool ObjectMoleculeConnect(ObjectMolecule* I, int& nBond, pymol::vla<BondType>& bondvla,
                           struct CoordSet *cs, int bondSearchMode,
-                          int connectModeOverride)
+                          int connectModeOverride,
+                          bool pbc)
 {
-#define cMULT 1
   PyMOLGlobals *G = I->G;
-  int a, b, c, d, e, f, i, j;
-  int a1, a2;
-  float *v1, *v2;
-  int maxBond;
-  MapType *map;
-  BondType *ii1;
-  const BondType* ii2;
-  int flag;
-  int order;
   AtomInfoType* const ai = I->AtomInfo.data();
-  AtomInfoType *ai1, *ai2;
-  /* Sulfur cutoff */
-  float cutoff_s;
-  float cutoff_v;
-  float max_cutoff;
-  int repeat = true;
-  int discrete_chains = SettingGetGlobal_i(G, cSetting_pdb_discrete_chains);
-  int connect_bonded = SettingGetGlobal_b(G, cSetting_connect_bonded);
-  int connect_mode = SettingGetGlobal_i(G, cSetting_connect_mode);
-  int unbond_cations = SettingGetGlobal_i(G, cSetting_pdb_unbond_cations);
-  int ok = true;
-  cutoff_v = SettingGetGlobal_f(G, cSetting_connect_cutoff);
-  cutoff_s = cutoff_v + 0.2F;
-  max_cutoff = cutoff_s;
+  auto discrete_chains = SettingGet<int>(G, cSetting_pdb_discrete_chains);
+  auto const connect_bonded = SettingGet<bool>(G, cSetting_connect_bonded);
+  auto const unbond_cations = SettingGet<int>(G, cSetting_pdb_unbond_cations);
+  auto const cutoff_v = SettingGet<float>(G, cSetting_connect_cutoff);
+  auto const max_cutoff = cutoff_v + 0.2F; ///< Sulfur cutoff
+  auto connect_mode = (connectModeOverride >= 0)
+                          ? connectModeOverride
+                          : SettingGet<int>(G, cSetting_connect_mode);
 
-  if(connectModeOverride >= 0)
-    connect_mode = connectModeOverride;
-
-  if(connect_mode == 2) {       /* force use of distance-based connectivity,
-                                   ignoring that provided with file */
+  if (connect_mode == 2) {
+    // Force use of distance-based connectivity, ignoring that
+    // provided with file.
     bondSearchMode = true;
     cs->NTmpBond = 0;
     VLAFreeP(cs->TmpBond);
@@ -3694,162 +3721,159 @@ bool ObjectMoleculeConnect(ObjectMolecule* I, int& nBond, pymol::vla<BondType>& 
     connect_mode = 0;
   }
 
-  /*  FeedbackMask[FB_ObjectMolecule]=0xFF; */
   nBond = 0;
-  maxBond = cs->NIndex * 8;
-  bondvla.resize(maxBond);
-  CHECKOK(ok, bool(bondvla));
-  while(ok && repeat) {
+  auto const maxBond = cs->NIndex * 8;
+  // Number of bonds is typically close to number of atoms
+  bondvla.reserve(cs->NIndex * 1.2);
+  p_return_val_if_fail(bondvla, false); // memory error
+
+  bool repeat = false;
+  switch (connect_mode) {
+  case 0: /* distance-based and explicit (not HETATM to HETATM) */
+  case 2: /* distance-based only */
+  case 3: /* distance-based and explicit (even HETATM to HETATM) */
+    repeat = bondSearchMode && cs->NIndex > 0;
+  }
+
+  // Distance-based bond location
+  while (repeat) {
     repeat = false;
+    nBond = 0;
 
-    /* 
-     * BOND SEARCH MODE
-     */
-    if(cs->NIndex && bondSearchMode) {  /* &&(!I->DiscreteFlag) WLD 010527 */
-      /* if there are atoms, and we need to search for bonds, instead of using
-       * (possibly) supplied CONECT records... */
+    // For monitoring excessive numbers of bonds
+    int violations = 0;
+    auto const max_violations = cs->NIndex >> 3; // 12%
+    auto const cnt = pymol::make_unique<signed char[]>(size_t(cs->NIndex));
+    p_return_val_if_fail(cnt, false); // memory error
 
-      PRINTFB(G, FB_ObjectMolecule, FB_Blather)
-        " %s: Searching for bonds amongst %d coordinates.\n", __func__,
-        cs->NIndex ENDFB(G);
-      if(Feedback(G, FB_ObjectMolecule, FB_Debugging)) {
-        for(a = 0; a < cs->NIndex; a++)
-          printf(" %s: coord %d %8.3f %8.3f %8.3f\n", __func__,
-                 a, cs->Coord[a * 3], cs->Coord[a * 3 + 1], cs->Coord[a * 3 + 2]);
-      }
+    /* initialize each atom's (max) expected valence */
+    for (unsigned i = 0; i < cs->NIndex; ++i) {
+      auto valcnt = AtomInfoGetExpectedValence(G, ai + cs->IdxToAtm[i]);
+      cnt[i] = (valcnt < 0) ? 6 : valcnt;
+    }
 
-      switch (connect_mode) {
-	/* DISTANCE BASED CONNECTIONS */
-      case 0:                  /* distance-based and explicit (not HETATM to HETATM) */
-      case 3:                  /* distance-based and explicit (even HETATM to HETATM) */
-      case 2:                  /* distance-based only */  {
-          /* distance-based bond location  */
-          int violations = 0;
-          int *cnt = pymol::malloc<int>(cs->NIndex);
-          int valcnt;
+    // Search for symop bonds (periodic boundary conditions)?
+    int offset_begin = 0, offset_end = 1, symmat_end = 1;
+    if (pbc && cs->getSymmetry() && //
+        !cs->getSymmetry()->Crystal.isSuspicious()) {
+      offset_begin = -1;
+      offset_end = 2;
+      symmat_end = cs->getSymmetry()->getNSymMat();
+      assert(symmat_end > 0);
+    }
 
-	  CHECKOK(ok, cnt);
+    /* make a map of the local neighborhood in space */
+    auto const map = std::unique_ptr<MapType>(
+        MapNew(G, (max_cutoff + MAX_VDW) * (offset_begin ? -1 : 1), //
+            cs->Coord, cs->NIndex));
+    p_return_val_if_fail(map, false); // memory error
+    MapSetupExpress(map.get()); // Don't let MapEIter call this in omp parallel
 
-	  if (ok){
-	    /* initialize each atom's (max) expected valence */
-	    for(i = 0; i < cs->NIndex; i++) {
-	      valcnt = AtomInfoGetExpectedValence(G, ai + cs->IdxToAtm[i]);
-	      if(valcnt < 0)
-		valcnt = 6;
-	      cnt[i] = valcnt;
-	    }
-	  }
+    /// Return false on error
+    auto const find_bonds_for_atom = [&](unsigned i, float const* v1,
+                                         pymol::SymOp const& symop) -> bool {
+      auto const a1 = cs->IdxToAtm[i];
+      auto* const ai1 = ai + a1;
 
-	  /* make a map of the local neighborhood in space */
-	  if (ok)
-	    map = MapNew(G, max_cutoff + MAX_VDW, cs->Coord, cs->NIndex, NULL);
-	  CHECKOK(ok, map);
-          if(ok) {
-            int dim12 = map->D1D2;
-            int dim2 = map->Dim[2];
+      for (const auto j : MapEIter(*map, v1)) {
+        if (i <= j && !symop)
+          continue;
 
-            for(i = 0; ok && i < cs->NIndex; i++) {
-              if(nBond > maxBond)
-                break;
-	      /* atom i's position in space */
-              v1 = cs->Coord + (3 * i);
+        /* position in space for atom 2 */
+        auto const* const v2 = cs->coordPtr(j);
+        auto const a2 = cs->IdxToAtm[j];
+        auto* const ai2 = ai + a2;
 
-              a1 = cs->IdxToAtm[i];
-              ai1 = ai + a1;
+        if (!is_distance_bonded(G, cs, ai1, ai2, v1, v2, cutoff_v, connect_mode,
+                discrete_chains, connect_bonded, unbond_cations))
+          continue;
 
-              MapLocus(map, v1, &a, &b, &c);
-	      /* d = [a-1, a, a+1] */
-              for(d = a - 1; ok && d <= a + 1; d++) {
-                int *j_ptr1 = map->Head + d * dim12 + (b - 1) * dim2;
-		/* e = [b-1, b, b+1] */
-                for(e = b - 1; ok && e <= b + 1; e++) {
-                  int *j_ptr2 = j_ptr1 + c - 1;
-                  j_ptr1 += dim2;
-		  /* f = [c-1, c, c+1] */
-                  for(f = c - 1; ok && f <= c + 1; f++) {
-                    j = *(j_ptr2++);    /*  *MapFirst(map,d,e,f)); */
-                    while(ok && j >= 0) {
-                      if(i < j) {
-			/* position in space for atom 2 */
-                        v2 = cs->Coord + (3 * j);
-                        a2 = cs->IdxToAtm[j];
-                        ai2 = ai + a2;
+        /* we have a bond, now process it */
 
-                        flag = is_distance_bonded(G, cs, ai1, ai2, v1, v2,
-                            cutoff_v, connect_mode, discrete_chains,
-                            connect_bonded, unbond_cations);
-
-                        {
-
-			  /* we have a bond, now process it */
-                          if(flag) {
-                            auto bnd = bondvla.check(nBond);
-			    CHECKOK(ok, bool(bondvla));
-			    if (ok){
-                              BondTypeInit2(bnd, a1, a2);
-			      order = 1;
-			    }
-			    /* if we allow bonds between chains and it screws up the
-			     * bonding, disallow inter-chain bonds */
-                            if(ok && discrete_chains < 0) {   /* if we're allowing bonds between chains,
-								 then make sure things don't get out of hand */
-                              if(cnt[i] == -1)
-                                violations++;
-                              if(cnt[j] == -1)
-                                violations++;
-			      /* decrement free valences, since we have a bond */
-                              cnt[i]--;
-                              cnt[j]--;
-                              if(violations > (cs->NIndex >> 3)) {
-                                /* if more than 12% of the structure has excessive #'s of bonds... */
-                                PRINTFB(G, FB_ObjectMolecule, FB_Blather)
-                                  " %s: Assuming chains are discrete...\n", __func__
-                                  ENDFB(G);
-                                discrete_chains = 1;
-                                repeat = true;
-                                goto do_it_again;
-                              }
-                            }
-
-                            if(!ai1->hetatm || ai1->resn == G->lex_const.MSE) {
-                              if(AtomInfoSameResidue(I->G, ai1, ai2)) {
-                                /* hookup standard disconnected PDB residue */
-                                assign_pdb_known_residue(G, ai1, ai2, &order);
-                              }
-                            }
-                            bnd->order = -order;      /* store tentative valence as negative */
-                            nBond++;
-                          }
-                        }
-                      }
-                      j = MapNext(map, j);
-                    }
-                  }
-                }
-              }
-            }
-          do_it_again:
-            MapFree(map);
-            FreeP(cnt);
+        int order = 1;
+        if (!ai1->hetatm || ai1->resn == G->lex_const.MSE) {
+          if (AtomInfoSameResidue(I->G, ai1, ai2)) {
+            /* hookup standard disconnected PDB residue */
+            assign_pdb_known_residue(G, ai1, ai2, &order);
           }
         }
-      case 1:                  /* only use explicit connectivity from file (don't do anything) */
-        break;
-      case 4:                  /* dictionary-based connectivity */
-        /* TODO */
-        break;
+
+#ifdef PYMOL_OPENMP
+#pragma omp critical
+#endif
+        {
+          auto const bnd = bondvla.check(nBond++);
+          BondTypeInit2(
+              bnd, a2, a1, -order /* store tentative valence as negative */);
+          bnd->symop_2 = symop;
+
+          /* if we allow bonds between chains and it screws up
+           * the bonding, disallow inter-chain bonds */
+          if (discrete_chains < 0) {
+            /* decrement free valences, since we have a bond */
+            if (--cnt[i] == -2)
+              violations++;
+            if (--cnt[j] == -2)
+              violations++;
+
+            if (violations > max_violations) {
+              PRINTFB(G, FB_ObjectMolecule, FB_Blather)
+              " %s: Assuming chains are discrete...\n", __func__ ENDFB(G);
+
+              discrete_chains = 1;
+              repeat = 1;
+            }
+          }
+        }
+
+        if (repeat) {
+          return false;
+        }
       }
-      PRINTFB(G, FB_ObjectMolecule, FB_Blather)
-        " %s: Found %d bonds.\n", __func__, nBond ENDFB(G);
+
+      return true;
+    };
+
+    bool break_all = false;
+
+    // Do bond search in parallel for every atom
+#ifdef PYMOL_OPENMP
+#pragma omp parallel for
+#endif
+    for (int i = 0; i < cs->NIndex; ++i) {
+      float _v1_buf[3];
+      pymol::SymOp symop{};
+      for (symop.x = offset_begin; symop.x < offset_end; ++symop.x) {
+        for (symop.y = offset_begin; symop.y < offset_end; ++symop.y) {
+          for (symop.z = offset_begin; symop.z < offset_end; ++symop.z) {
+            for (symop.index = 0; symop.index != symmat_end; ++symop.index) {
+              auto const* const v1 = cs->coordPtrSym(i, symop, _v1_buf);
+              assert(v1);
+
+              if (break_all || !find_bonds_for_atom(i, v1, symop) ||
+                  nBond > maxBond) {
+                goto break_all_find_bonds_for_atom;
+              }
+            }
+          }
+        }
+      }
+
+      continue;
+    break_all_find_bonds_for_atom:
+      // can't "break" inside an omp parallel block
+      break_all = true;
     }
-    if(repeat) {
-      nBond = 0;
-    }
+
+    PRINTFB(G, FB_ObjectMolecule, FB_Blather)
+      " %s: Found %d bonds.\n", __func__, nBond ENDFB(G);
   }
+
   /* if we have explicit connectivity, determine if we need to set check_conect_all */
-  if(ok && cs->NTmpBond && cs->TmpBond) {
-    int check_conect_all = false;
-    int pdb_conect_all = false;
+  if (cs->NTmpBond && cs->TmpBond) {
+    bool check_conect_all = false;
+    bool pdb_conect_all = false;
+
     PRINTFB(G, FB_ObjectMolecule, FB_Blather)
       " %s: incorporating explicit bonds. %d %d\n", __func__,
       nBond, cs->NTmpBond ENDFB(G);
@@ -3857,10 +3881,9 @@ bool ObjectMoleculeConnect(ObjectMolecule* I, int& nBond, pymol::vla<BondType>& 
        bondSearchMode && (connect_mode == 0) && cs->NIndex) {
       /* if no bonds were found, and we have explicit connectivity,
        * try to determine if we need to set pdb_conect_mode */
-      for(i = 0; i < cs->NIndex; i++) {
-        a1 = cs->IdxToAtm[i];
-        ai1 = ai + a1;
-        if(ai1->bonded && (!ai1->hetatm)) {
+      for (unsigned i = 0; i < cs->NIndex; ++i) {
+        auto const& ai1 = ai[cs->IdxToAtm[i]];
+        if (ai1.bonded && !ai1.hetatm) {
           /* apparent PDB ATOM record with explicit bonding... */
           check_conect_all = true;
           break;
@@ -3869,17 +3892,15 @@ bool ObjectMoleculeConnect(ObjectMolecule* I, int& nBond, pymol::vla<BondType>& 
     }
 
     bondvla.check(nBond + cs->NTmpBond);
-    CHECKOK(ok, bool(bondvla));
-    if (ok){
-      ii1 = bondvla.data() + nBond;
-      ii2 = cs->TmpBond;
-    }
-    if (ok) {
-      int n_atom = I->NAtom;
-      for(a = 0; a < cs->NTmpBond; a++) {
-        a1 = cs->IdxToAtm[ii2->index[0]];       /* convert bonds from index space */
-        a2 = cs->IdxToAtm[ii2->index[1]];       /* to atom space */
-        if((a1 >= 0) && (a2 >= 0) && (a1 < n_atom) && (a2 < n_atom)) {
+    p_return_val_if_fail(bondvla, false); // memory error
+
+    auto* ii1 = bondvla.data() + nBond;
+    auto* ii2 = cs->TmpBond.data();
+    int n_atom = I->NAtom;
+    for (unsigned a = 0; a < cs->NTmpBond; ++a) {
+      auto const a1 = cs->IdxToAtm[ii2->index[0]];
+      auto const a2 = cs->IdxToAtm[ii2->index[1]];
+      if((a1 >= 0) && (a2 >= 0) && (a1 < n_atom) && (a2 < n_atom)) {
           if(check_conect_all) {
             if((!ai[a1].hetatm) && (!ai[a2].hetatm)) {
               /* found bond between non-HETATMs -- so tell PyMOL to CONECT all ATOMs
@@ -3889,117 +3910,141 @@ bool ObjectMoleculeConnect(ObjectMolecule* I, int& nBond, pymol::vla<BondType>& 
           }
           ai[a1].bonded = true;
           ai[a2].bonded = true;
-          (*ii1) = (*ii2);      /* note this copies owned ids and thus settings etc. */
+          *ii1 = std::move(*ii2);
           ii1->index[0] = a1;
           ii1->index[1] = a2;
           ii1++;
           ii2++;
-
-        }
+          nBond++;
       }
     }
 
-    if (ok){
-      nBond = nBond + cs->NTmpBond;
-      VLAFreeP(cs->TmpBond);
-      cs->NTmpBond = 0;
-      
-      if(pdb_conect_all) {
+    VLAFreeP(cs->TmpBond);
+    cs->NTmpBond = 0;
+
+    if(pdb_conect_all) {
 	int dummy;
-	if(!SettingGetIfDefined_b(G, I->Setting, cSetting_pdb_conect_all, &dummy)) {
+	if(!SettingGetIfDefined_b(G, I->Setting.get(), cSetting_pdb_conect_all, &dummy)) {
           {
-            CSetting** handle = I->getSettingHandle(-1);
+            auto handle = I->getSettingHandle(-1);
             if(handle) {
-	      SettingCheckHandle(G, handle);
-	      SettingSet_b(*handle, cSetting_pdb_conect_all, true);
+	      SettingCheckHandle(G, *handle);
+	      SettingSet_b(handle->get(), cSetting_pdb_conect_all, true);
 	    }
 	  }
 	}
-      }
     }
   }
   
   /* Link b/t ligand and residue? */
-  if(ok && cs->NTmpLinkBond && cs->TmpLinkBond) {
+  if (cs->NTmpLinkBond && cs->TmpLinkBond) {
     PRINTFB(G, FB_ObjectMolecule, FB_Blather)
       "%s: incorporating linkage bonds. %d %d\n", __func__,
       nBond, cs->NTmpLinkBond ENDFB(G);
+
     bondvla.check(nBond + cs->NTmpLinkBond);
-    CHECKOK(ok, bool(bondvla));
-    if (ok){
-      ii1 = bondvla.data() + nBond;
-      ii2 = cs->TmpLinkBond;
-      for(a = 0; a < cs->NTmpLinkBond; a++) {
-	a1 = ii2->index[0];       /* first atom is in object */
-	a2 = cs->IdxToAtm[ii2->index[1]]; /* second is in the cset */
-	ai[a1].bonded = true;
-	ai[a2].bonded = true;
-	(*ii1) = (*ii2);          /* note this copies owned ids and thus settings etc. */
-	ii1->index[0] = a1;
-	ii1->index[1] = a2;
-	ii1++;
-	ii2++;
-      }
-      nBond = nBond + cs->NTmpLinkBond;
+    p_return_val_if_fail(bondvla, false); // memory error
+
+    auto* ii1 = bondvla.data() + nBond;
+    auto* ii2 = cs->TmpLinkBond.data();
+    for (unsigned a = 0; a < cs->NTmpLinkBond; ++a) {
+      auto const a1 = ii2->index[0];               /* first atom is in object */
+      auto const a2 = cs->IdxToAtm[ii2->index[1]]; /* second is in the cset */
+      ai[a1].bonded = true;
+      ai[a2].bonded = true;
+      (*ii1) = std::move(*ii2);
+      ii1->index[0] = a1;
+      ii1->index[1] = a2;
+      ii1++;
+      ii2++;
     }
+    nBond += cs->NTmpLinkBond;
     VLAFreeP(cs->TmpLinkBond);
     cs->NTmpLinkBond = 0;
   }
 
-  PRINTFD(G, FB_ObjectMolecule)
-    " %s: elminating duplicates with %d bonds...\n", __func__, nBond ENDFD;
+  // Eliminate duplicates
+  // TODO do we expect any?
+  // TODO should we also check with swapped indices?
+  // TODO why not for discrete objects?
+  if (nBond > 1 && !I->DiscreteFlag) {
+    PRINTFD(G, FB_ObjectMolecule)
+      " %s: elminating duplicates with %d bonds...\n", __func__, nBond ENDFD;
 
-  if(ok && !I->DiscreteFlag) {
-    UtilSortInPlace(G, bondvla.data(), nBond, sizeof(BondType), (UtilOrderFn *) BondInOrder);
-    if(nBond) {                 /* eliminate duplicates */
-      ii1 = bondvla.data() + 1;
-      ii2 = bondvla.data() + 1;
-      a = nBond - 1;
-      nBond = 1;
-      if(a > 0)
-        while(a--) {
-          if((ii2->index[0] != (ii1 - 1)->index[0]) ||
-             (ii2->index[1] != (ii1 - 1)->index[1])) {
-            *(ii1++) = *(ii2++);        /* copy bond */
-            nBond++;
-          } else {
-            if((ii2->order > 0) && ((ii1 - 1)->order < 0))
-              (ii1 - 1)->order = ii2->order;    /* use most certain valence */
-            ii2++;              /* skip bond */
-          }
+    UtilSortInPlace(
+        G, bondvla.data(), nBond, sizeof(BondType), (UtilOrderFn*) BondInOrder);
+    auto* ii1 = bondvla.data();
+    auto* ii2 = bondvla.data() + 1;
+    for (int a = nBond; --a;) {
+      if (BondCompare(ii2, ii1) != 0) {
+        if (++ii1 != ii2) {
+          *ii1 = std::move(*ii2);
         }
-      bondvla.resize(nBond);
-      CHECKOK(ok, bool(bondvla));
+      } else if (ii2->order > 0 && ii1->order < 0) {
+        // use most certain valence
+        ii1->order = ii2->order;
+      }
+      ii2++;
     }
+    nBond = ii1 - bondvla.data() + 1;
   }
-  /* restore bond oder positivity */
 
-  if (ok){
-    ii1 = bondvla.data();
-    for(a = 0; a < nBond; a++) {
-      if(ii1->order < 0)
-	ii1->order = -ii1->order;
-      ii1++;
-    }
+  bondvla.resize(nBond);
+
+  // restore bond order positivity
+  for (auto bnd = bondvla.begin(), bnd_end = bnd + nBond; bnd != bnd_end;
+       ++bnd) {
+    if (bnd->order < 0)
+      bnd->order = -bnd->order;
   }
 
   PRINTFD(G, FB_ObjectMolecule)
     " %s: leaving with %d bonds...\n", __func__, nBond ENDFD;
-  return ok;
+  return true;
 }
 
+void ObjectMoleculeConnectDiscrete(ObjectMolecule* I, int searchFlag,
+    int connectModeOverride, bool pbc)
+{
+  for (int i = 0; i < I->NCSet; i++) {
+    if (!I->CSet[i]) {
+      continue;
+    }
+
+    int nbond = 0;
+    pymol::vla<BondType> bond;
+
+    ObjectMoleculeConnect(I, nbond, bond, I->CSet[i], searchFlag, connectModeOverride, pbc);
+
+    if (!bond) {
+      continue;
+    }
+
+    if (!I->Bond) {
+      I->Bond = std::move(bond);
+    } else {
+      I->Bond.check(I->NBond + nbond - 1);
+      std::copy_n(bond.data(), nbond, I->Bond.data() + I->NBond);
+    }
+
+    I->NBond += nbond;
+  }
+}
 
 /*========================================================================*/
+/**
+ * Sort the ObjectMolecule::AtomInfo and ObjectMolecule::Bond arrays and adjust
+ * IdxToAtm/AtmToIdx in all coordiante sets.
+ *
+ * This function has no effect on discrete objects.
+ */
 int ObjectMoleculeSort(ObjectMolecule * I)
 {                               /* sorts atoms and bonds */
   int *index;
   int *outdex = NULL;
   int a, b;
-  CoordSet *cs, **dcs;
-  int *dAtmToIdx = NULL;
   int ok = true;
   if(!I->DiscreteFlag) {        /* currently, discrete objects are never sorted */
-    int n_bytes = sizeof(int) * I->NAtom;
     int already_in_order = true;
     int i_NAtom = I->NAtom;
     index = AtomInfoGetSortedIndex(I->G, I, I->AtomInfo, i_NAtom, &outdex);
@@ -4020,63 +4065,26 @@ int ObjectMoleculeSort(ObjectMolecule * I)
       }
 
       for(a = -1; a < I->NCSet; a++) {  /* coordinate set mapping */
-        if(a < 0) {
-          cs = I->CSTmpl;
-        } else {
-          cs = I->CSet[a];
-        }
+        auto* cs = (a < 0) ? I->CSTmpl : I->CSet[a];
 
         if(cs) {
           int cs_NIndex = cs->NIndex;
           int *cs_IdxToAtm = cs->IdxToAtm.data();
-          int *cs_AtmToIdx = cs->AtmToIdx.data();
           for(b = 0; b < cs_NIndex; b++)
             cs_IdxToAtm[b] = outdex[cs_IdxToAtm[b]];
-          if(cs_AtmToIdx) {
-            memset(cs_AtmToIdx, -1, n_bytes);
-            /*          for(b=0;b<i_NAtom;b++)
-               cs_AtmToIdx[b]=-1; */
-            for(b = 0; b < cs_NIndex; b++) {
-              cs_AtmToIdx[cs_IdxToAtm[b]] = b;
-            }
-          }
         }
       }
+
+      I->updateAtmToIdx();
 
       ExecutiveUniqueIDAtomDictInvalidate(I->G);
 
       pymol::vla<AtomInfoType> atInfo(i_NAtom);
       CHECKOK(ok, atInfo);
       if (ok){
-	/* autozero here is important */
 	for(a = 0; a < i_NAtom; a++)
 	  atInfo[a] = std::move(I->AtomInfo[index[a]]);
-      }
-      VLAFreeP(I->AtomInfo);
-      std::swap(I->AtomInfo, atInfo);
-
-      if(ok && I->DiscreteFlag) {
-        dcs = VLAlloc(CoordSet *, i_NAtom);
-	CHECKOK(ok, dcs);
-	if (ok)
-	  dAtmToIdx = VLAlloc(int, i_NAtom);
-	CHECKOK(ok, dAtmToIdx);
-	if (ok){
-	  for(a = 0; a < i_NAtom; a++) {
-	    b = index[a];
-	    dcs[a] = I->DiscreteCSet[b];
-	    dAtmToIdx[a] = I->DiscreteAtmToIdx[b];
-	  }
-	} else {
-	  VLAFreeP(dcs);
-	  VLAFreeP(dAtmToIdx);
-	  dcs = NULL;
-	  dAtmToIdx = NULL;
-	}
-        VLAFreeP(I->DiscreteCSet);
-        VLAFreeP(I->DiscreteAtmToIdx);
-        I->DiscreteCSet = pymol::vla_take_ownership(dcs);
-        I->DiscreteAtmToIdx = pymol::vla_take_ownership(dAtmToIdx);
+        I->AtomInfo = std::move(atInfo);
       }
     }
     AtomInfoFreeSortedIndexes(I->G, &index, &outdex);
@@ -4089,3 +4097,23 @@ int ObjectMoleculeSort(ObjectMolecule * I)
   }
   return ok;
 }
+
+int ObjectMoleculeSetGeometry(
+    PyMOLGlobals* G, ObjectMolecule* I, int sele, int geom, int valence)
+{
+  int count = 0;
+  for (int a = 0; a < I->NAtom; ++a) {
+    auto s = I->AtomInfo[a].selEntry;
+
+    if(SelectorIsMember(G, s, sele)) {
+      auto& ai = I->AtomInfo[a];
+      ai.geom = geom;
+      ai.valence = valence;
+      ai.chemFlag = true;
+      count++;
+      break;
+    }
+  }
+  return count;
+}
+

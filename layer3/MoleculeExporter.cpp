@@ -34,18 +34,28 @@
 #include "PConv.h"
 #include "CifDataValueFormatter.h"
 #include "MaeExportHelpers.h"
+#include "Feedback.h"
 
 #ifdef _PYMOL_IP_PROPERTIES
 #include "Property.h"
 #endif
 
-/*
+#ifdef _PYMOL_IP_PROPERTIES
+#define _PYMOL_MAE_PROP_EXPORT
+#endif
+
+/**
  * Get the capitalized element symbol. Assume that ai->elem is either all
  * caps (e.g. loaded from PDB) or capitalized.
  */
 class ElemCanonicalizer {
   ElemName m_buffer;
 public:
+  /**
+   * Returns either a pointer to AtomInfoType::elem, if it's already in
+   * canonical form, or to an internal buffer which stays valid until
+   * operator()() is called again.
+   */
   const char * operator() (const AtomInfoType * ai) {
     const char * elem = ai->elem;
     if (ai->protons < 1 || !elem[0] || !elem[1] || islower(elem[1]))
@@ -56,11 +66,15 @@ public:
   }
 };
 
-/*
+/**
  * "sprintf" into VLA string buffer. Will grow (and reallocate) the VLA if
  * needed.
  *
- * Returns the number of characters written (excluding the null byte).
+ * @param vla Buffer to write to (at `offset`)
+ * @param offset Buffer offset
+ * @param format See `printf`
+ *
+ * @return Number of characters written (excluding the null byte)
  */
 static
 int VLAprintf(pymol::vla<char>& vla, int offset, const char * format, ...) {
@@ -113,23 +127,24 @@ struct AtomRef {
   int id;
 };
 
-/*
+/**
  * Abstract base class for exporting molecular selections
  */
 struct MoleculeExporter {
-  pymol::vla<char> m_buffer; // out
+  pymol::vla<char> m_buffer; //!< Out buffer and final result
 
 protected:
-  int m_offset;
-  CoordSet        * m_last_cs;
-  ObjectMolecule  * m_last_obj;
-  int m_last_state;
+  int m_offset = 0; //!< Offset into `m_buffer`
+
+  CoordSet* m_last_cs = nullptr;
+  ObjectMolecule* m_last_obj = nullptr;
+  int m_last_state = -1;
 
   PyMOLGlobals * G;
   SeleCoordIterator m_iter;
 
-  bool m_retain_ids;
-  int m_id;
+  bool m_retain_ids = false;
+  int m_id = 0;
 
   struct matrix_t {
     double storage[16];
@@ -138,20 +153,20 @@ protected:
     m_mat_full, // for ANISOU
     m_mat_move; // for coordinates (TTT)
 
-  // atom coordinate
 private:
   float m_coord_tmp[3];
 protected:
+  /// Current atom coordinates
   const float *m_coord;
 
-  // how to restart models
+  /// How to restart models
   int m_multi;
 
   std::vector<BondRef> m_bonds;
   std::vector<int> m_tmpids;
 
 public:
-  // quasi constructor (easier to inherit than a real constructor)
+  /// Quasi constructor (easier to inherit than a real constructor)
   virtual void init(PyMOLGlobals * G_) {
     G = G_;
 
@@ -159,12 +174,6 @@ public:
     m_buffer[0] = '\0';
 
     m_mat_ref.ptr = nullptr;
-    m_offset = 0;
-    m_last_cs  = nullptr;
-    m_last_obj = nullptr;
-    m_last_state = -1;
-    m_retain_ids = false;
-    m_id = 0;
 
     setMulti(getMultiDefault());
   }
@@ -172,7 +181,7 @@ public:
   // destructor
   virtual ~MoleculeExporter() = default;
 
-  /*
+  /**
    * Do the export (e.g. populate "m_buffer" with file contents)
    */
   void execute(int sele, int state);
@@ -186,7 +195,7 @@ public:
   }
 
 private:
-  /*
+  /**
    * Reset the "index" fields in the selector table
    */
   void resetTmpIDs() {
@@ -195,7 +204,7 @@ private:
   }
 
 protected:
-  /*
+  /**
    * Get the current atom's running index (1-based). Most formats use
    * this index to reference atoms from the bonds table. If "retain_ids"
    * is true, then this is AtomInfoType::id.
@@ -204,14 +213,14 @@ protected:
     return m_tmpids[m_iter.getAtm()];
   }
 
-  /*
+  /**
    * Get the running index for the given atom.
    */
   int getTmpID(int atm) {
     return m_tmpids[atm];
   }
 
-  /*
+  /**
    * Get the current state title if not empty, or the object name otherwise.
    */
   const char * getTitleOrName() {
@@ -221,19 +230,19 @@ protected:
   }
 
 public:
-  /*
+  /**
    * Set the reference coordinate frame to the inverse of the given
    * object's transformation matrix.
    */
   void setRefObject(const char * ref_object, int ref_state);
 
 private:
-  /*
+  /**
    * Update a transformation matrix for the current state
    */
   void updateMatrix(matrix_t& matrix, bool history);
 
-  /*
+  /**
    * Populates the "m_bonds" vector
    */
   void populateBondRefs();
@@ -243,6 +252,7 @@ protected:
   virtual int getMultiDefault() const = 0;
   virtual bool isExcludedBond(int atm1, int atm2);
   virtual bool isExcludedBond(const BondType * bond);
+  virtual bool excludeSymOpBonds() const { return true; }
   virtual void writeAtom() = 0;
   virtual void writeBonds() = 0;
   virtual void beginObject();
@@ -253,7 +263,7 @@ protected:
   virtual void beginFile() {}
 };
 
-/*
+/**
  * Return true if this bond should not be exported
  */
 bool MoleculeExporter::isExcludedBond(int atm1, int atm2) {
@@ -301,7 +311,7 @@ void MoleculeExporter::endCoordSet() {
 }
 
 void MoleculeExporter::execute(int sele, int state) {
-  m_iter.init(G, sele, state);
+  m_iter = SeleCoordIterator(G, sele, state);
   m_iter.setPerObject(m_multi != cMolExportGlobal);
 
   beginFile();
@@ -373,8 +383,8 @@ void MoleculeExporter::setRefObject(const char * ref_object, int ref_state) {
   if (!base)
     return;
 
-  if(ref_state < 0) {
-    ref_state = ObjectGetCurrentState(base, true);
+  if (ref_state == cStateAll) {
+    ref_state = cStateCurrent;
   }
 
   if(ObjectGetTotalMatrix(base, ref_state, true, matrix)) {
@@ -385,7 +395,7 @@ void MoleculeExporter::setRefObject(const char * ref_object, int ref_state) {
 
 void MoleculeExporter::updateMatrix(matrix_t& matrix, bool history) {
   const auto& ref = m_mat_ref.ptr;
-  if (ObjectGetTotalMatrix(reinterpret_cast<CObject*>(m_iter.obj),
+  if (ObjectGetTotalMatrix(reinterpret_cast<pymol::CObject*>(m_iter.obj),
         m_iter.state, history, matrix.storage)) {
     if (ref) {
       left_multiply44d44d(ref, matrix.storage);
@@ -413,6 +423,9 @@ void MoleculeExporter::populateBondRefs() {
     if (isExcludedBond(bond))
       continue;
 
+    if (excludeSymOpBonds() && bond->hasSymOp())
+      continue;
+
     if (id1 > id2)
       std::swap(id1, id2);
 
@@ -424,9 +437,10 @@ void MoleculeExporter::populateBondRefs() {
 // ---------------------------------------------------------------------------------- //
 
 struct MoleculeExporterPDB : public MoleculeExporter {
-  bool m_conect_all;
+  bool m_conect_all = false;
   bool m_conect_nodup;
-  bool m_mdl_written;
+  bool m_mdl_written = false;
+  bool m_cryst1_written = false;
   bool m_use_ter_records;
   const AtomInfoType * m_pre_ter = nullptr;
   PDBInfoRec m_pdb_info;
@@ -437,8 +451,6 @@ struct MoleculeExporterPDB : public MoleculeExporter {
 
     UtilZeroMem((void *) &m_pdb_info, sizeof(PDBInfoRec));
 
-    m_conect_all    = false;
-    m_mdl_written   = false;
     m_conect_nodup  = SettingGetGlobal_b(G, cSetting_pdb_conect_nodup);
     m_retain_ids    = SettingGetGlobal_b(G, cSetting_pdb_retain_ids);
     m_use_ter_records = SettingGetGlobal_b(G, cSetting_pdb_use_ter_records);
@@ -463,7 +475,7 @@ struct MoleculeExporterPDB : public MoleculeExporter {
     }
   }
 
-  /*
+  /**
    * Write a TER record if the previous atom was polymer and `ai`
    * is NULL, non-polymer, or has a different chain identifier.
    */
@@ -521,26 +533,31 @@ struct MoleculeExporterPDB : public MoleculeExporter {
   }
 
   void writeCryst1() {
-    const auto& sym = m_iter.cs->Symmetry ? m_iter.cs->Symmetry.get(): m_iter.obj->Symmetry;
+    if (m_cryst1_written) {
+      return;
+    }
+
+    const auto* sym = m_iter.cs->getSymmetry();
 
     if (sym) {
-      const auto& dim   = sym->Crystal.Dim;
-      const auto& angle = sym->Crystal.Angle;
+      const auto* dim = sym->Crystal.dims();
+      const auto* angle = sym->Crystal.angles();
       m_offset += VLAprintf(m_buffer, m_offset,
           "CRYST1%9.3f%9.3f%9.3f%7.2f%7.2f%7.2f %-11s%4d\n",
           dim[0], dim[1], dim[2], angle[0], angle[1], angle[2],
-          sym->SpaceGroup, sym->PDBZValue);
+          sym->spaceGroup(), sym->PDBZValue);
+      m_cryst1_written = true;
     }
   }
 
   void beginObject() override {
     MoleculeExporter::beginObject();
 
-    m_conect_all = SettingGet_b(G, m_iter.obj->Setting, nullptr, cSetting_pdb_conect_all);
+    m_conect_all = SettingGet_b(G, m_iter.obj->Setting.get(), nullptr, cSetting_pdb_conect_all);
 
     if (m_multi == cMolExportByObject) {
       m_offset += VLAprintf(m_buffer, m_offset, "HEADER    %.40s\n", m_iter.obj->Name);
-      writeCryst1();
+      m_cryst1_written = false;
     }
   }
 
@@ -549,8 +566,10 @@ struct MoleculeExporterPDB : public MoleculeExporter {
 
     if (m_multi == cMolExportByCoordSet) {
       m_offset += VLAprintf(m_buffer, m_offset, "HEADER    %.40s\n", getTitleOrName());
-      writeCryst1();
+      m_cryst1_written = false;
     }
+
+    writeCryst1();
 
     if (m_iter.isMultistate()
         && (m_iter.isPerObject() || m_iter.state != m_last_state)) {
@@ -587,6 +606,11 @@ struct MoleculeExporterPQR: public MoleculeExporterPDB {
     m_pdb_info.pqr_workarounds = SettingGetGlobal_b(G, cSetting_pqr_workarounds);
   }
 
+  // don't write MODEL records
+  void beginCoordSet() override {
+    MoleculeExporter::beginCoordSet();
+  }
+
   bool isExcludedBond(int atm1, int atm2) override {
     // no bonds for PQR format
     return true;
@@ -596,7 +620,7 @@ struct MoleculeExporterPQR: public MoleculeExporterPDB {
 // ---------------------------------------------------------------------------------- //
 
 struct MoleculeExporterCIF : public MoleculeExporter {
-  const char * m_molecule_name;
+  const char* m_molecule_name = "multi";
   CifDataValueFormatter cifrepr;
 
   // quasi constructor
@@ -609,7 +633,6 @@ struct MoleculeExporterCIF : public MoleculeExporter {
     cifrepr.m_buf.resize(10);
 
     m_retain_ids    = SettingGetGlobal_b(G, cSetting_pdb_retain_ids);
-    m_molecule_name = "multi";
 
     m_offset += VLAprintf(m_buffer, m_offset,
         "# generated by PyMOL " _PyMOL_VERSION "\n");
@@ -620,11 +643,11 @@ struct MoleculeExporterCIF : public MoleculeExporter {
   }
 
   void writeCellSymmetry() {
-    const auto& sym = m_iter.cs->Symmetry.get() ? m_iter.cs->Symmetry.get() : m_iter.obj->Symmetry;
+    const auto* sym = m_iter.cs->getSymmetry();
 
     if (sym) {
-      const auto& dim   = sym->Crystal.Dim;
-      const auto& angle = sym->Crystal.Angle;
+      const auto* dim = sym->Crystal.dims();
+      const auto* angle = sym->Crystal.angles();
       m_offset += VLAprintf(m_buffer, m_offset, "#\n"
           "_cell.entry_id %s\n"
           "_cell.length_a %.3f\n"
@@ -638,7 +661,7 @@ struct MoleculeExporterCIF : public MoleculeExporter {
           cifrepr(m_molecule_name),
           dim[0], dim[1], dim[2], angle[0], angle[1], angle[2],
           cifrepr(m_molecule_name),
-          cifrepr(sym->SpaceGroup));
+          cifrepr(sym->spaceGroup()));
     }
   }
 
@@ -717,25 +740,29 @@ struct MoleculeExporterCIF : public MoleculeExporter {
         m_iter.state + 1);
   }
 
+  /**
+   * @todo TODO Not implemented
+   * Bond categories:
+   * 1) within residue -> _chem_comp_bond
+   * 2) polymer links -> implicit
+   * 3) others -> _struct_conn
+   */
   void writeBonds() override {
-    // TODO
-    // Bond categories:
-    // 1) within residue -> _chem_comp_bond
-    // 2) polymer links -> implicit
-    // 3) others -> _struct_conn
     m_bonds.clear();
   }
 
+  /**
+   * @todo TODO Not implemented
+   * Exclude polymer links
+   */
   bool isExcludedBond(int atm1, int atm2) override {
-    // TODO
-    // polymer links
     return true;
   }
 };
 
 // ---------------------------------------------------------------------------------- //
 
-/*
+/**
  * Experimental PyMOL style annotated mmCIF. Exports colors, representation,
  * and secondary structure.
  */
@@ -872,7 +899,7 @@ struct MoleculeExporterMOL : public MoleculeExporter {
     // write bonds
     for (auto& bond : m_bonds) {
       m_offset += VLAprintf(m_buffer, m_offset, "%3d%3d%3d%3d  0  0  0\n",
-          bond.id1, bond.id2, bond.ref->order, (int) bond.ref->stereo);
+          bond.id1, bond.id2, bond.ref->order, 0);
     }
 
     m_bonds.clear();
@@ -1061,14 +1088,15 @@ struct MoleculeExporterMOL2 : public MoleculeExporter {
 struct MoleculeExporterMAE : public MoleculeExporter {
   int m_n_atoms;
   int m_n_atoms_offset;
-  int m_n_arom_bonds;
+  int m_n_arom_bonds = 0;
   std::map<int, const AtomInfoType *> m_atoms;
   bool m_has_anisou;
+  bool m_has_pbc = false;
 
 #ifdef _PYMOL_MAE_PROP_EXPORT
 #endif
 
-  /* Check if current object has any ANISOU data
+  /** Check if current object has any ANISOU data
    */
   bool currentObjectHasAnisou() const {
     for (auto i = 0; i < m_iter.obj->NAtom; ++i) {
@@ -1080,14 +1108,14 @@ struct MoleculeExporterMAE : public MoleculeExporter {
     return false;
   }
 
-  /* Write a single string value to the output buffer
+  /** Write a single string value to the output buffer
    */
   void writeMaeValue(const char * s) {
     auto s_quoted = MaeExportStrRepr(s);
     m_offset += VLAprintf(m_buffer, m_offset, "%s\n", s_quoted.c_str());
   }
 
-  /* Write the given keys to the output buffer.
+  /** Write the given keys to the output buffer.
    * Add type prefix and make key unique if necessary.
    */
   void writeMaeKeys(const std::vector<std::string> &keys) {
@@ -1116,8 +1144,6 @@ struct MoleculeExporterMAE : public MoleculeExporter {
   // quasi constructor
   void init(PyMOLGlobals * G_) override {
     MoleculeExporter::init(G_);
-
-    m_n_arom_bonds = 0;
   }
 
   int getMultiDefault() const override {
@@ -1134,7 +1160,7 @@ struct MoleculeExporterMAE : public MoleculeExporter {
   void beginMolecule() override {
     MoleculeExporter::beginMolecule();
 
-    std::string groupid = MaeExportGetSubGroupId(G, reinterpret_cast<CObject*>(m_iter.obj));
+    std::string groupid = MaeExportGetSubGroupId(G, reinterpret_cast<pymol::CObject*>(m_iter.obj));
 
     m_offset += VLAprintf(m_buffer, m_offset,
         "\nf_m_ct {\n"
@@ -1146,6 +1172,20 @@ struct MoleculeExporterMAE : public MoleculeExporter {
 
     if (!groupid.empty()) {
       keys.emplace_back("s_m_subgroupid");
+    }
+
+    const auto* sym = m_iter.cs->getSymmetry();
+    m_has_pbc = sym && !sym->spaceGroup()[0];
+    if (m_has_pbc) {
+      keys.insert(keys.end(),
+          {"r_chorus_box_ax", "r_chorus_box_bx", "r_chorus_box_cx",
+              "r_chorus_box_ay", "r_chorus_box_by", "r_chorus_box_cy",
+              "r_chorus_box_az", "r_chorus_box_bz", "r_chorus_box_cz"});
+    } else if (sym) {
+      keys.insert(keys.end(),
+          {"r_pdb_PDB_CRYST1_a", "r_pdb_PDB_CRYST1_b", "r_pdb_PDB_CRYST1_c",
+              "r_pdb_PDB_CRYST1_alpha", "r_pdb_PDB_CRYST1_beta",
+              "r_pdb_PDB_CRYST1_gamma", "s_pdb_PDB_CRYST1_Space_Group"});
     }
 
 #ifdef _PYMOL_MAE_PROP_EXPORT
@@ -1162,6 +1202,19 @@ struct MoleculeExporterMAE : public MoleculeExporter {
 
     if (!groupid.empty()) {
       m_offset += VLAprintf(m_buffer, m_offset, "\"%s\"\n", groupid.c_str());
+    }
+
+    if (m_has_pbc) {
+      const auto* f2r = sym->Crystal.fracToReal();
+      m_offset +=
+          VLAprintf(m_buffer, m_offset, "%f %f %f %f %f %f %f %f %f\n", f2r[0],
+              f2r[1], f2r[2], f2r[3], f2r[4], f2r[5], f2r[6], f2r[7], f2r[8]);
+    } else if (sym) {
+      const auto* dim = sym->Crystal.dims();
+      const auto* angle = sym->Crystal.angles();
+      m_offset += VLAprintf(m_buffer, m_offset, "%f %f %f %f %f %f %s\n",
+          dim[0], dim[1], dim[2], angle[0], angle[1], angle[2],
+          MaeExportStrRepr(sym->spaceGroup()).c_str());
     }
 
 #ifdef _PYMOL_MAE_PROP_EXPORT
@@ -1323,6 +1376,8 @@ struct MoleculeExporterMAE : public MoleculeExporter {
     ++m_n_atoms;
   }
 
+  bool excludeSymOpBonds() const override { return !m_has_pbc; }
+
   void writeBonds() override {
     // atom count
     m_n_atoms_offset += sprintf(m_buffer + m_n_atoms_offset, "m_atom[%d]", m_n_atoms);
@@ -1440,9 +1495,26 @@ public:
     return cMolExportGlobal;
   }
 
+  void writeCellSymmetry() {
+    if (!m_raw.unitCell.empty()) {
+      return;
+    }
+
+    const auto* sym = m_iter.cs->getSymmetry();
+
+    if (sym) {
+      const auto* dim = sym->Crystal.dims();
+      const auto* angle = sym->Crystal.angles();
+      m_raw.unitCell = {dim[0], dim[1], dim[2], angle[0], angle[1], angle[2]};
+      m_raw.spaceGroup = sym->spaceGroup();
+    }
+  }
+
   void beginCoordSet() override {
     m_raw.chainsPerModel.emplace_back(0);
     m_last_ai = nullptr;
+
+    writeCellSymmetry();
   }
 
   void writeAtom() override {
@@ -1535,19 +1607,18 @@ public:
 
 /*========================================================================*/
 
-/*
+/**
  * Export the given selection to a molecular file format.
  *
- * Return the file contents as a VLA (must be VLAFree'd by caller) or
- * NULL if the format is not known.
+ * @return File contents or NULL if the format is not known.
  *
- * format:      pdb, sdf, ...
- * selection:   atom selection expression
- * state:       object state (-1 for all, -2/-3 for current)
- * ref_object:  name of a reference object which defines the frame of
+ * @param format      pdb, sdf, ...
+ * @param selection   atom selection expression
+ * @param state       object state (-1 for all, -2/-3 for current)
+ * @param ref_object  name of a reference object which defines the frame of
  *              reference for exported coordinates
- * ref_state:   reference object state
- * multi:       defines how to handle selections which span multiple objects
+ * @param ref_state   reference object state
+ * @param multi       defines how to handle selections which span multiple objects
  *              -1: use format-specific default
  *               0: one global "molecule" (default for PDB)
  *               1: molecules per objects
@@ -1570,12 +1641,12 @@ pymol::vla<char> MoleculeExporterGetStr(PyMOLGlobals * G,
 
   std::unique_ptr<MoleculeExporter> exporter;
 
-  if (ref_state < -1)
-   ref_state = state;
+  if (ref_state < cStateAll)
+    ref_state = state;
 
   // do "effective" current states
-  if (state == -2)
-    state = -3;
+  if (state == cStateCurrent)
+    state = cSelectorUpdateTableEffectiveStates;
 
   if (strcmp(format, "pdb") == 0) {
     exporter.reset(new MoleculeExporterPDB);
@@ -1624,8 +1695,8 @@ pymol::vla<char> MoleculeExporterGetStr(PyMOLGlobals * G,
 /*========================================================================*/
 
 #ifndef _PYMOL_NOPY
-/*
- * See MoleculeExporterGetPyBonds
+/**
+ * See ::MoleculeExporterGetPyBonds
  */
 struct MoleculeExporterPyBonds : public MoleculeExporter {
   PyObject *m_bond_list; // out
@@ -1654,7 +1725,7 @@ protected:
 
 /*========================================================================*/
 
-/*
+/**
  * Get all bonds within the given selection.
  *
  * Returns a list of (atm1, atm2, order) tuples, where atm1 and atm2 are
@@ -1686,7 +1757,7 @@ PyObject *MoleculeExporterGetPyBonds(PyMOLGlobals * G,
 
 /*========================================================================*/
 
-/*
+/**
  * Creates a `chempy.models.Indexed` instance from a selection.
  *
  * Changes from the old implementation (SelectorGetChemPyModel):
@@ -1694,21 +1765,17 @@ PyObject *MoleculeExporterGetPyBonds(PyMOLGlobals * G,
  *
  */
 struct MoleculeExporterChemPy : public MoleculeExporter {
-  PyObject *m_model; // out
+  PyObject *m_model = nullptr; //!< Final result (never NULL)
 
 protected:
-  int m_n_cs; // number of coordinate sets
+  int m_n_cs = 0; //!< Number of coordinate sets
   float m_ref_tmp[3];
-  PyObject *m_atom_list;
+  PyObject* m_atom_list = nullptr;
 
 public:
   // quasi constructor
   void init(PyMOLGlobals * G_) override {
     MoleculeExporter::init(G_);
-
-    m_model = nullptr;
-    m_n_cs = 0;
-    m_atom_list = nullptr;
   }
 
 protected:
@@ -1784,6 +1851,8 @@ protected:
 #endif
   }
 
+  bool excludeSymOpBonds() const override { return false; }
+
   void writeBonds() override {
     if (!m_model)
       return;
@@ -1803,8 +1872,13 @@ protected:
       int index[] = { bond.id1 - 1, bond.id2 - 1 };
       PConvInt2ToPyObjAttr(bnd, "index", index);
       PConvIntToPyObjAttr(bnd, "order",     bond.ref->order);
-      PConvIntToPyObjAttr(bnd, "id",        bond.ref->id);
-      PConvIntToPyObjAttr(bnd, "stereo",    bond.ref->stereo);
+
+      // symop
+      if (bond.ref->symop_2) {
+        PConvStringToPyObjAttr(
+            bnd, "symmetry_2", bond.ref->symop_2.to_string().c_str());
+      }
+
       PyList_SetItem(bond_list, b, bnd);    /* steals bnd reference */
     }
 
@@ -1821,14 +1895,17 @@ protected:
 
 /*========================================================================*/
 
+/**
+ * Implementation of `cmd.get_model`
+ */
 PyObject *ExecutiveSeleToChemPyModel(PyMOLGlobals * G,
     const char *s1, int state,
     const char *ref_object, int ref_state)
 {
-  if (state == -1)
+  if (state == cStateAll)
     state = 0; // no multi-state support
 
-  if (ref_state < -1)
+  if (ref_state < cStateAll)
     ref_state = state;
 
   int sele = SelectorIndexByName(G, s1);

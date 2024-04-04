@@ -6,8 +6,6 @@ License: BSD-2-Clause
 
 '''
 
-from __future__ import print_function
-
 import os
 
 # supported file types for installation. Do not support pyc and pyo binaries,
@@ -22,7 +20,7 @@ class BadInstallationFile(Exception):
     pass
 
 def get_default_user_plugin_path():
-    '''
+    r'''
     User plugin directory defaults to ~/.pymol/startup on Linux and to
     %APPDATA%\pymol\startup on windows.
     '''
@@ -294,7 +292,7 @@ def installPluginFromFile(ofile, parent=None, plugdir=None):
             mod_dir = os.path.join(plugdir, name)
             check_reinstall(name, mod_dir)
             check_valid_name(name)
-            shutil.copytree(odir, mod_dir)
+            shutil.copytree(odir, mod_dir, ignore=shutil.ignore_patterns(".git"))
 
             mod_file = os.path.join(mod_dir, '__init__.py')
 
@@ -305,7 +303,7 @@ def installPluginFromFile(ofile, parent=None, plugdir=None):
             mod_dir = os.path.join(plugdir, name)
             check_reinstall(name, mod_dir)
             check_valid_name(name)
-            shutil.copytree(odir, mod_dir)
+            shutil.copytree(odir, mod_dir, ignore=shutil.ignore_patterns(".git"))
 
             mod_file = os.path.join(mod_dir, '__init__.py')
 

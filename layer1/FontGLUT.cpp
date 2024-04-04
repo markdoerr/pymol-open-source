@@ -18,7 +18,6 @@ Z* -------------------------------------------------------------------
 
 #include "os_gl.h"
 #include "Base.h"
-#include "OOMac.h"
 #include "FontGLUT.h"
 #include "Text.h"
 #include "Ray.h"
@@ -54,7 +53,7 @@ static void FontGLUTRestore(CFontGLUT * I)
   glPixelStorei(GL_UNPACK_ALIGNMENT, I->alignment);
 }
 
-/*
+/**
  * check if masked `c` equals `value`
  */
 static inline bool masked_byte_equals(char c, char mask, char value) {
@@ -67,7 +66,7 @@ static inline bool byte_check_10xxxxxx(char c) {
       0x80 /* value 0b10000000 */);
 }
 
-/*
+/**
  * Read the next unicode point from a UTF-8 string and advance the string
  * pointer. If decoding fails, set `error` to true. If `error` is already
  * true, don't attempt to decode and return the next byte value as-is.
@@ -108,8 +107,8 @@ static unsigned int next_utf8_character(const char * &st, bool &error) {
   return c;
 }
 
-const char* CFontGLUT::RenderOpenGL(RenderInfo* info, const char* st,
-    float size, float* rpos, bool needSize, short relativeMode,
+const char* CFontGLUT::RenderOpenGL(const RenderInfo* info, const char* st,
+    float size, const float* rpos, bool needSize, short relativeMode,
     bool shouldRender, CGO* shaderCGO)
 {
   auto I = this;
@@ -119,7 +118,7 @@ const char* CFontGLUT::RenderOpenGL(RenderInfo* info, const char* st,
     FontGLUTBitmapFontRec const *font_info = glutFont;
     int first, last;
     FontGLUTBitmapCharRec const *ch;
-    int textured = true && SHADERCGOARGV;
+    int textured = true && shaderCGO;
     int pushed = OrthoGetPushed(G);
     int sampling = 1;
     const float _0 = 0.0F, _1 = 1.0F, _m1 = -1.0F;
@@ -285,7 +284,7 @@ const char* CFontGLUT::RenderOpenGL(RenderInfo* info, const char* st,
                                               (float) ch->advance, &fprnt, sampling);
                 }
                 if(id) {
-                  CharacterRenderOpenGL(G, info, id, false, relativeMode SHADERCGOARGVAR);   /* handles advance */
+                  CharacterRenderOpenGL(G, info, id, false, relativeMode, shaderCGO);   /* handles advance */
                 }
               }
             }
@@ -307,8 +306,8 @@ const char* CFontGLUT::RenderOpenGL(RenderInfo* info, const char* st,
   return st;
 }
 
-const char* CFontGLUT::RenderOpenGLFlat(RenderInfo* info, const char* st,
-    float size, float* rpos, bool needSize, short relativeMode,
+const char* CFontGLUT::RenderOpenGLFlat(const RenderInfo* info, const char* st,
+    float size, const float* rpos, bool needSize, short relativeMode,
     bool shouldRender, CGO* shaderCGO)
 {
   return RenderOpenGL(
@@ -316,7 +315,7 @@ const char* CFontGLUT::RenderOpenGLFlat(RenderInfo* info, const char* st,
 }
 
 const char* CFontGLUT::RenderRay(CRay* ray, const char* st, float size,
-    float* rpos, bool needSize, short relativeMode)
+    const float* rpos, bool needSize, short relativeMode)
 {
   auto I = this;
   PyMOLGlobals *G = I->G;

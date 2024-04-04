@@ -10,9 +10,33 @@
 #include "os_python.h"
 #include "PConv.h"
 #include "pymol/type_traits.h"
+#include "pymol/algorithm.h"
 #include <catch2/catch.hpp>
 
 namespace pymol {
+
+/**
+ * Basic PyMOL Instance & Globals for C-testing purposes.
+ */
+class PyMOLInstance
+{
+public:
+  PyMOLInstance();
+  PyMOLInstance(const PyMOLInstance&) = delete;
+  PyMOLInstance& operator=(const PyMOLInstance&) = delete;
+  PyMOLInstance(PyMOLInstance&&) = delete;
+  PyMOLInstance& operator=(PyMOLInstance&&) = delete;
+  ~PyMOLInstance();
+
+  /**
+   * @return PyMOLGlobals pointer
+   */
+  PyMOLGlobals* G() noexcept;
+private:
+  CPyMOL* m_Inst;
+  PyMOLGlobals* m_G;
+};
+
 namespace test {
 
 // Checks whether obj is zero'd out (Struct of all PoD Types without non-default
@@ -34,16 +58,7 @@ static bool isArrayZero(const T *arr, const std::size_t len) {
 // Checks whether arrays are equal
 template <typename T>
 static bool isArrayEqual(const T *arr1, const T *arr2, const std::size_t len) {
-  return std::equal(arr1, arr1 + len, arr2);
-}
-
-/**
- * Checks whether two floating point values are nearly equal
- */
-template <typename T, typename U, typename CommonT = pymol::common_type_t<T, U>>
-static bool isAlmostEqual(T a, U b, CommonT epsilon = 1e-6)
-{
-  return std::abs(a - b) <= epsilon;
+  return pymol::equal(arr1, arr1 + len, arr2);
 }
 
 // Checks whether type has all special member functions
@@ -62,10 +77,6 @@ template <typename T> static bool isRegular()
 template <typename T> static bool isNullptr(const T *ptr) {
   return ptr == nullptr;
 }
-struct PYMOL_TEST_API {
-  static PyObject *PYMOL_TEST_SUCCESS;
-  static PyObject *PYMOL_TEST_FAILURE;
-};
 
 class TmpFILE
 {

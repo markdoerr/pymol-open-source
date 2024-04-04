@@ -25,18 +25,26 @@ Z* -------------------------------------------------------------------
 #define cOrthoBottomSceneMargin DIP2PIXEL(18)
 #define cOrthoLineHeight DIP2PIXEL(12)
 
+#include <functional>
 #include <string>
 
 #include"os_gl.h"
-#include"Block.h"
-#include"Feedback.h"
-#include"Deferred.h"
-#include"Image.h"
 #include"pymol/memory.h"
+#include"PyMOLEnums.h"
 
 #define cOrthoScene 1
 #define cOrthoTool 2
 #define cOrthoHidden 3
+
+struct BlockRect;
+struct Block;
+struct PyMOLGlobals;
+class COrtho;
+class CGO;
+namespace pymol
+{
+    class Image;
+}
 
 int OrthoInit(PyMOLGlobals * G, int showSplash);
 void OrthoFree(PyMOLGlobals * G);
@@ -47,7 +55,7 @@ void OrthoDetach(PyMOLGlobals * G, Block * block);
 void OrthoReshape(PyMOLGlobals * G, int width, int height, int force);
 int OrthoGetWidth(PyMOLGlobals * G);
 int OrthoGetHeight(PyMOLGlobals * G);
-void OrthoDoDraw(PyMOLGlobals * G, int render_mode);
+void OrthoDoDraw(PyMOLGlobals * G, OrthoRenderMode render_mode);
 void OrthoDoViewportWhenReleased(PyMOLGlobals *G);
 void OrthoPushMatrix(PyMOLGlobals * G);
 void OrthoPopMatrix(PyMOLGlobals * G);
@@ -81,9 +89,7 @@ void OrthoBusyFast(PyMOLGlobals * G, int progress, int total);
 void OrthoBusyPrime(PyMOLGlobals * G);
 void OrthoCommandSetBusy(PyMOLGlobals * G, int busy);
 void OrthoCommandIn(COrtho&, const char *buffer);
-inline void OrthoCommandIn(PyMOLGlobals * G, const char *buffer){
-  OrthoCommandIn(*G->Ortho, buffer);
-}
+void OrthoCommandIn(PyMOLGlobals * G, const char *buffer);
 std::string OrthoCommandOut(COrtho& ortho);
 void OrthoCommandNest(PyMOLGlobals * G, int dir);
 bool OrthoCommandIsEmpty(COrtho& ortho);
@@ -106,13 +112,13 @@ int OrthoCommandWaiting(PyMOLGlobals * G);
 
 int OrthoTextVisible(PyMOLGlobals * G);
 void OrthoReshapeWizard(PyMOLGlobals * G, ov_size height);
-void OrthoDefer(PyMOLGlobals * G, std::unique_ptr<CDeferred> && D);
+void OrthoDefer(PyMOLGlobals* G, std::function<void()>&& D);
 void OrthoExecDeferred(PyMOLGlobals * G);
 int OrthoDeferredWaiting(PyMOLGlobals * G);
 
-int OrthoGetRenderMode(PyMOLGlobals * G);
+OrthoRenderMode OrthoGetRenderMode(PyMOLGlobals * G);
 void OrthoDrawBuffer(PyMOLGlobals * G, GLenum mode);
-int OrthoGetWrapClickSide(PyMOLGlobals * G);
+ClickSide OrthoGetWrapClickSide(PyMOLGlobals* G);
 float *OrthoGetOverlayColor(PyMOLGlobals * G);
 void OrthoDrawWizardPrompt(PyMOLGlobals * G, CGO *orthoCGO);
 
@@ -131,8 +137,5 @@ std::pair<int, int> OrthoGetSize(const COrtho& ortho);
 
 void OrthoInvalidateDoDraw(PyMOLGlobals * G);
 void OrthoRenderCGO(PyMOLGlobals * G);
-
-#define OrthoLineLength 1024
-typedef char OrthoLineType[OrthoLineLength];
 
 #endif

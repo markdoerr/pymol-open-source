@@ -12,24 +12,48 @@
 #include "Test.h"
 #include "TestCmdTest2.h"
 
-using PyMOL_TestAPI = pymol::test::PYMOL_TEST_API;
+#include "P.h"
+#include "PyMOL.h"
+#include "PyMOLGlobals.h"
+#include "PyMOLOptions.h"
 
-PyObject *PyMOL_TestAPI::PYMOL_TEST_SUCCESS = PConvAutoNone(Py_None);
-PyObject *PyMOL_TestAPI::PYMOL_TEST_FAILURE = Py_BuildValue("i", -1);
-
+/**
+ * @pre GIL
+ * @return 0 on success, non-zero on error
+ */
 PyObject *CmdTest2(PyObject *, PyObject *) {
   int argc = 1;
   char argv0[] = "pymol";
   char *argv[] = {argv0};
   auto result = Catch::Session().run(argc, argv);
-  if (!result) {
-    return PyMOL_TestAPI::PYMOL_TEST_SUCCESS;
-  } else {
-    return PyMOL_TestAPI::PYMOL_TEST_FAILURE;
-  }
+  return PyLong_FromLong(result);
 }
 
 namespace pymol {
+
+PyMOLInstance::PyMOLInstance()
+{
+  auto options = PyMOLOptions_New();
+  options->show_splash = false;
+  m_Inst = PyMOL_NewWithOptions(options);
+  PyMOLOptions_Free(options);
+  m_G = PyMOL_GetGlobals(m_Inst);
+  PInit(m_G, true);
+  PyMOL_Start(m_Inst);
+}
+
+PyMOLInstance::~PyMOLInstance()
+{
+  PyMOL_Stop(m_Inst);
+  PFree(m_G);
+  PyMOL_Free(m_Inst);
+}
+
+PyMOLGlobals* PyMOLInstance::G() noexcept
+{
+  return m_G;
+}
+
 namespace test {
 
 TmpFILE::TmpFILE()

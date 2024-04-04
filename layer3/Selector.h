@@ -25,55 +25,63 @@ Z* -------------------------------------------------------------------
 #include"CoordSet.h"
 #include"DistSet.h"
 #include"ObjectMap.h"
-#include"OVOneToAny.h"
 #include"Match.h"
 
-#include "AtomIterators.h"
+#include "Result.h"
 
-#define cSelectionAll 0
-#define cSelectionNone 1
+constexpr SelectorID_t cSelectionInvalid = -1;
+constexpr SelectorID_t cSelectionAll = 0;
+constexpr SelectorID_t cSelectionNone = 1;
 
 int SelectorInit(PyMOLGlobals * G);
 int SelectorInitImpl(PyMOLGlobals * G, CSelector **I, short init2);
-int SelectorCreate(PyMOLGlobals * G, const char *name, const char *sele, ObjectMolecule * obj,
+
+/// return type of all SelectorCreate related functions
+typedef pymol::Result<int> SelectorCreateResult_t;
+
+SelectorCreateResult_t SelectorCreate(PyMOLGlobals * G, const char *name, const char *sele, ObjectMolecule * obj,
                    int quiet, Multipick * mp);
-int SelectorCreateWithStateDomain(PyMOLGlobals * G, const char *name, const char *sele,
+SelectorCreateResult_t SelectorCreateWithStateDomain(PyMOLGlobals * G, const char *name, const char *sele,
                                   ObjectMolecule * obj, int quiet, Multipick * mp,
                                   int state, const char *domain);
-int SelectorCreateSimple(PyMOLGlobals * G, const char *name, const char *sele);
-int SelectorCreateFromObjectIndices(PyMOLGlobals * G, const char *sname, ObjectMolecule * obj,
+SelectorCreateResult_t SelectorCreateSimple(PyMOLGlobals * G, const char *name, const char *sele);
+SelectorCreateResult_t SelectorCreateFromObjectIndices(PyMOLGlobals * G, const char *sname, ObjectMolecule * obj,
                                     int *idx, int n_idx);
-int SelectorCreateOrderedFromObjectIndices(PyMOLGlobals * G, const char *sname,
+SelectorCreateResult_t SelectorCreateOrderedFromObjectIndices(PyMOLGlobals * G, const char *sname,
                                            ObjectMolecule * obj, int *idx, int n_idx);
-int SelectorCreateOrderedFromMultiObjectIdxTag(PyMOLGlobals * G, const char *sname,
-                                               ObjectMolecule ** obj, int **pri_idx,
-                                               int *n_idx, int n_obj);
 
-int SelectorCreateFromTagDict(PyMOLGlobals * G, const char *sname, const std::unordered_map<int, int>& id2tag,
+SelectorCreateResult_t SelectorCreateFromTagDict(PyMOLGlobals * G, const char *sname, const std::unordered_map<int, int>& id2tag,
                               int exec_managed);
 
 
 /* if n_idx is negative, then looks for negative *idx as the sentinel */
-int SelectorMoveMember(PyMOLGlobals * G, int s, int sele_old, int sele_new);
-int SelectorCreateEmpty(PyMOLGlobals * G, const char *name, int exec_managed);
+bool SelectorMoveMember(PyMOLGlobals * G, SelectorMemberOffset_t s, SelectorID_t sele_old, SelectorID_t sele_new);
+SelectorCreateResult_t SelectorCreateEmpty(PyMOLGlobals * G, const char *name, int exec_managed);
 
-int SelectorUpdateTable(PyMOLGlobals * G, int req_state, int domain);
-int SelectorUpdateTableImpl(PyMOLGlobals * G, CSelector *I, int req_state, int domain);
+int SelectorUpdateTableImpl(PyMOLGlobals * G, CSelector *I, int req_state, SelectorID_t domain);
 
-#define cSelectorUpdateTableAllStates -1
-#define cSelectorUpdateTableCurrentState -2
-#define cSelectorUpdateTableEffectiveStates -3
+constexpr StateIndex_t cSelectorUpdateTableAllStates = cStateAll;
+constexpr StateIndex_t cSelectorUpdateTableCurrentState = cStateCurrent;
+constexpr StateIndex_t cSelectorUpdateTableEffectiveStates =
+    -3; ///< deprecated, use cSelectorUpdateTableCurrentState instead
 
-int SelectorIndexByName(PyMOLGlobals * G, const char *sele, int ignore_case=-1);
-const char *SelectorGetNameFromIndex(PyMOLGlobals * G, int index);
+int SelectorUpdateTable(PyMOLGlobals*,
+    StateIndex_t req_state = cSelectorUpdateTableAllStates,
+    SelectorID_t domain = cSelectionInvalid);
+
+SelectorID_t SelectorIndexByName(PyMOLGlobals * G, const char *sele, int ignore_case=-1);
+const char *SelectorGetNameFromIndex(PyMOLGlobals * G, SelectorID_t index);
 void SelectorFree(PyMOLGlobals * G);
 void SelectorFreeImpl(PyMOLGlobals * G, CSelector *I, short init2);
 void SelectorDelete(PyMOLGlobals * G, const char *sele);
 void SelectorFreeTmp(PyMOLGlobals * G, const char *name);
 int SelectorGetTmp2(PyMOLGlobals * G, const char *input, char *store, bool quiet=false);
 int SelectorGetTmp(PyMOLGlobals * G, const char *input, char *store, bool quiet=false);
-int SelectorCheckTmp(PyMOLGlobals * G, const char *name);
-int SelectorLoadCoords(PyMOLGlobals * G, PyObject * coords, int sele, int state);
+
+pymol::Result<int> SelectorGetTmp2Result(PyMOLGlobals * G, const char *input, char *store, bool quiet=false);
+pymol::Result<int> SelectorGetTmpResult(PyMOLGlobals * G, const char *input, char *store, bool quiet=false);
+
+pymol::Result<> SelectorLoadCoords(PyMOLGlobals * G, PyObject * coords, int sele, int state);
 PyObject *SelectorGetCoordsAsNumPy(PyMOLGlobals * G, int sele, int state);
 float SelectorSumVDWOverlap(PyMOLGlobals * G, int sele1, int state1,
                             int sele2, int state2, float adjust);
@@ -94,24 +102,24 @@ DistSet *SelectorGetDihedralSet(PyMOLGlobals * G, DistSet * ds,
                                 int sele3, int state3,
                                 int sele4, int state4,
                                 int mode, float *angle_sum, int *angle_cnt);
-int SelectorGetSeleNCSet(PyMOLGlobals * G, int sele);
-int SelectorCreateObjectMolecule(PyMOLGlobals * G, int sele, const char *name,
+int SelectorGetSeleNCSet(PyMOLGlobals * G, SelectorID_t sele);
+int SelectorCreateObjectMolecule(PyMOLGlobals * G, SelectorID_t sele, const char *name,
                                  int target_state, int state, int discrete,
                                  int zoom, int quiet, int singletons, int copy_properties);
-int SelectorSubdivide(PyMOLGlobals * G, const char *pref, int sele1, int sele2,
-                      int sele3, int sele4,
+int SelectorSubdivide(PyMOLGlobals * G, const char *pref, SelectorID_t sele1, SelectorID_t sele2,
+                      SelectorID_t sele3, SelectorID_t sele4,
                       const char *fragPref, const char *compName, int *bondMode);
-ObjectMolecule *SelectorGetSingleObjectMolecule(PyMOLGlobals * G, int sele);
-ObjectMolecule *SelectorGetFirstObjectMolecule(PyMOLGlobals * G, int sele);
-int SelectorRenameObjectAtoms(PyMOLGlobals * G, ObjectMolecule * obj, int sele, int force,
-                              int update_table);
+ObjectMolecule *SelectorGetSingleObjectMolecule(PyMOLGlobals * G, SelectorID_t sele);
+ObjectMolecule *SelectorGetFirstObjectMolecule(PyMOLGlobals * G, SelectorID_t sele);
+int SelectorRenameObjectAtoms(PyMOLGlobals* G, ObjectMolecule* obj,
+    SelectorID_t sele, bool force, bool update_table);
 void SelectorUpdateObjectSele(PyMOLGlobals * G, ObjectMolecule * obj);
 void SelectorDeletePrefixSet(PyMOLGlobals * G, const char *pref);
-void SelectorUpdateCmd(PyMOLGlobals * G, int sele0, int sele1, int sta0, int sta1,
-                       int method, int quiet);
+pymol::Result<> SelectorUpdateCmd(PyMOLGlobals* G, SelectorID_t sele0, SelectorID_t sele1,
+    int sta0, int sta1, int method, int quiet);
 pymol::Result<std::array<float, 3>> SelectorGetSingleAtomVertex(PyMOLGlobals * G, int sele, int state);
-pymol::Result<std::pair<ObjectMolecule*, int>> SelectorGetSingleAtomObjectIndex(PyMOLGlobals * G, int sele);
-int *SelectorGetResidueVLA(PyMOLGlobals * G, int sele0, int ca_only,
+pymol::Result<std::pair<ObjectMolecule*, int>> SelectorGetSingleAtomObjectIndex(PyMOLGlobals * G, SelectorID_t sele);
+int *SelectorGetResidueVLA(PyMOLGlobals * G, SelectorID_t, int ca_only,
                            ObjectMolecule * exclude);
 int SelectorCreateAlignments(PyMOLGlobals * G, int *pair, int sele1, int *vla1, int sele2,
                              int *vla2, const char *name1, const char *name2, int identical,
@@ -138,9 +146,9 @@ int SelectorMapGaussian(PyMOLGlobals * G, int sele1, ObjectMapState * oMap,
                         float buffer, int state, int normalize, int use_max, int quiet,
                         float resolution);
 
-PyObject *SelectorAsPyList(PyMOLGlobals * G, int sele1);
+PyObject *SelectorAsPyList(PyMOLGlobals * G, SelectorID_t sele1);
 int SelectorFromPyList(PyMOLGlobals * G, const char *name, PyObject * list);
-ObjectMolecule **SelectorGetObjectMoleculeVLA(PyMOLGlobals * G, int sele);
+ObjectMolecule **SelectorGetObjectMoleculeVLA(PyMOLGlobals * G, SelectorID_t sele);
 
 PyObject *SelectorColorectionGet(PyMOLGlobals * G, const char *prefix);
 int SelectorColorectionApply(PyMOLGlobals * G, PyObject * list, const char *prefix);
@@ -167,9 +175,9 @@ int SelectorIsAtomBondedToSele(PyMOLGlobals * G, ObjectMolecule * obj, int sele1
 
 int SelectorSetName(PyMOLGlobals * G, const char *new_name, const char *old_name);
 
-ObjectMolecule *SelectorGetFastSingleAtomObjectIndex(PyMOLGlobals * G, int sele,
+ObjectMolecule *SelectorGetFastSingleAtomObjectIndex(PyMOLGlobals * G, SelectorID_t sele,
                                                      int *index);
-ObjectMolecule *SelectorGetFastSingleObjectMolecule(PyMOLGlobals * G, int sele);
+ObjectMolecule *SelectorGetFastSingleObjectMolecule(PyMOLGlobals * G, SelectorID_t sele);
 MapType *SelectorGetSpacialMapFromSeleCoord(PyMOLGlobals * G, int sele, int state,
                                             float cutoff, float **coord_vla);
 
@@ -177,7 +185,7 @@ MapType *SelectorGetSpacialMapFromSeleCoord(PyMOLGlobals * G, int sele, int stat
  * Determines whether a string is a reserved keyword
  * @param str string candidate
  * @return true if the string is a reserved keyword
- * @Note: case-insensitive
+ * @note: case-insensitive
  */
 bool SelectorNameIsKeyword(PyMOLGlobals * G, const char *name);
 
@@ -195,20 +203,15 @@ int SelectorAssignAtomTypes(PyMOLGlobals * G, int sele, int state, int quiet, in
 
 #define SELECTOR_BASE_TAG 0x10
 
-typedef struct {
-  int selection;
-  int tag;                      /* must not be zero since it is also used as a boolean test for membership */
-  int next;
-} MemberType;
+int SelectorIsMember(PyMOLGlobals * G, SelectorMemberOffset_t, SelectorID_t);
 
-int SelectorIsMember(PyMOLGlobals * G, int start, int sele);
-
-/*
+/**
  * Wrapper around SelectorGetTmp/SelectorFreeTmp/SelectorIndexByName.
  *
  * Temporary named selection gets deleted when instance gets out of scope.
  */
 class SelectorTmp {
+protected:
   PyMOLGlobals* m_G = nullptr;
   char m_name[1024]{}; // OrthoLineType
   int m_count = -1;
@@ -218,6 +221,7 @@ public:
   SelectorTmp(PyMOLGlobals * G, const char * sele) : m_G(G) {
     m_count = SelectorGetTmp(m_G, sele, m_name);
   }
+  SelectorTmp(SelectorTmp&& other);
   SelectorTmp& operator=(SelectorTmp&& other) {
     std::swap(m_G, other.m_G);
     std::swap(m_count, other.m_count);
@@ -227,11 +231,56 @@ public:
   ~SelectorTmp() {
     SelectorFreeTmp(m_G, m_name);
   }
-  const char * getName() { return m_name; }
-  int getAtomCount() { return m_count; }
-  int getIndex() {
-    return m_name[0] ? SelectorIndexByName(m_G, m_name, false) : -1;
+  const char * getName() const { return m_name; }
+  int getAtomCount();
+  SelectorID_t getIndex() const {
+    return m_name[0] ? SelectorIndexByName(m_G, m_name, false) : cSelectionInvalid;
   }
+  // Factory which propagages errors
+  static pymol::Result<SelectorTmp> make(
+      PyMOLGlobals* G, const char* sele, bool empty_is_error = true);
 };
+
+struct SelectorTmp2 : SelectorTmp {
+  SelectorTmp2() = default;
+  SelectorTmp2(PyMOLGlobals* G, const char* sele)
+  {
+    m_G = G;
+    m_count = SelectorGetTmp2(m_G, sele, m_name);
+  }
+  // Factory which propagages errors
+  static pymol::Result<SelectorTmp2> make(
+      PyMOLGlobals* G, const char* sele, bool empty_is_error = false);
+};
+
+/**
+ * Check if atoms are neighbors
+ *
+ * @param maxDepth - maximum depth
+ * @param obj - object molecule
+ * @param at1 - atom id
+ * @param at2 - atom id
+ * @param zero - temporary memory
+ * @param scratch - temporary memory
+ *
+ * @return int - 1 if atoms are neighbors. 0 otherwise
+ */
+int SelectorCheckNeighbors(PyMOLGlobals* G, int maxDepth, ObjectMolecule* obj,
+    int at1, int at2, int* zero, int* scratch);
+
+/**
+ * Find all pairs between `sele1` and `sele2` which are within a distance
+ * cutoff.
+ *
+ * @param sele1 - selections index
+ * @param state1 - state index
+ * @param sele2 - selection index
+ * @param state2 - state index
+ * @param cutoff - cutoff distance
+ *
+ * @return vector of selector table index pairs
+ */
+std::vector<int> SelectorGetInterstateVector(PyMOLGlobals* G, int sele1,
+    int state1, int sele2, int state2, float cutoff);
 
 #endif

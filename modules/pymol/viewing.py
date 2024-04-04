@@ -12,18 +12,12 @@
 #-*
 #Z* -------------------------------------------------------------------
 
-from __future__ import print_function, absolute_import
+from . import colorprinting
 
 if True:
 
     import sys
-    if sys.version_info[0] == 2:
-        import thread
-    else:
-        import _thread as thread
-
     import threading
-    import traceback
     import pymol
     from . import selector
     import copy
@@ -31,9 +25,9 @@ if True:
     import re
     cmd = sys.modules["pymol.cmd"]
 
-    from .cmd import _cmd,lock,unlock,Shortcut,QuietException,_raising, \
+    from .cmd import _cmd, Shortcut, \
           _feedback,fb_module,fb_mask, \
-          repres,repres_sc, is_string, is_list, is_ok, is_error, \
+          repres,repres_sc, is_string, is_list, \
           repmasks,repmasks_sc, \
           toggle_dict,toggle_sc,stereo_dict,stereo_sc, \
           palette_dict, palette_sc, window_dict, window_sc, \
@@ -68,7 +62,7 @@ if True:
 
     view_sc = Shortcut(['store','recall','clear'])
 
-    def zoom(selection="all", buffer=0.0, state=0, complete=0, animate=0,_self=cmd):
+    def zoom(selection="all", buffer=0.0, state=0, complete=0, animate=0, *, _self=cmd):
         '''
 DESCRIPTION
 
@@ -131,17 +125,12 @@ SEE ALSO
         # preprocess selection
         selection = selector.process(selection)
         #
-        r = DEFAULT_ERROR
-        try:
-            _self.lock(_self)
+        with _self.lockcm:
             r = _cmd.zoom(_self._COb,str(selection),float(buffer),
                               int(state)-1,int(complete),float(animate))
-        finally:
-            _self.unlock(r,_self)
-        if _self._raising(r,_self): raise QuietException
         return r
 
-    def center(selection="all", state=0, origin=1, animate=0, _self=cmd):
+    def center(selection="all", state=0, origin=1, animate=0, *, _self=cmd):
         '''
 DESCRIPTION
 
@@ -179,21 +168,16 @@ SEE ALSO
 
     origin, orient, zoom
         '''
-        r = DEFAULT_ERROR
         # preprocess selection
         selection = selector.process(selection)
         #
-        try:
-            _self.lock(_self)
+        with _self.lockcm:
             r = _cmd.center(_self._COb,str(selection),int(state)-1,int(origin),float(animate))
-        finally:
-            _self.unlock(r,_self)
-        if _self._raising(r,_self): raise QuietException
         return r
 
-    clip_action_sc = Shortcut([ 'near','far','move','slab','atoms' ])
+    clip_action_sc = Shortcut([ 'near','far','move','slab','atoms', 'near_set', 'far_set' ])
 
-    def clip(mode, distance, selection=None, state=0, _self=cmd):
+    def clip(mode, distance, selection=None, state=0, *, _self=cmd):
         '''
 DESCRIPTION
 
@@ -230,22 +214,45 @@ SEE ALSO
 
     zoom, orient, reset
         '''
-        r = DEFAULT_ERROR
         mode = clip_action_sc.auto_err(str(mode),'mode')
         if selection is not None:
             selection = selector.process(selection)
         else:
             selection = ''
-        try:
-            _self.lock(_self)
+        with _self.lockcm:
             r = _cmd.clip(_self._COb,str(mode),float(distance),
                           str(selection),int(state)-1)
-        finally:
-            _self.unlock(r,_self)
-        if _self._raising(r,_self): raise QuietException
         return r
 
-    def origin(selection="(all)", object=None, position=None, state=0, _self=cmd):
+    def get_clip(quiet: int = 1, _self=cmd):
+        '''
+DESCRIPTION
+
+    "get_clip" returns the positions of the clipping planes.
+
+USAGE
+
+    get_clip
+
+ARGUMENTS
+
+EXAMPLES
+
+PYMOL API
+
+    cmd.get_clip()
+
+SEE ALSO
+
+    clip
+        '''
+        with _self.lockcm:
+            r = _cmd.get_clip(_self._COb)
+            if not quiet:
+                print(r)
+            return r
+
+    def origin(selection="(all)", object=None, position=None, state=0, *, _self=cmd):
         '''
 DESCRIPTION
 
@@ -282,12 +289,10 @@ SEE ALSO
     zoom, orient, reset
         '''
         #'
-        r = DEFAULT_ERROR
         # preprocess selection
         selection = selector.process(selection)
         #
-        try:
-            _self.lock(_self)
+        with _self.lockcm:
             if object is None: object=''
             if position is None: position=(0.0,0.0,0.0)
             else:
@@ -299,12 +304,9 @@ SEE ALSO
                                   float(position[1]),
                                   float(position[2])
                                   ),int(state)-1)
-        finally:
-            _self.unlock(r,_self)
-        if _self._raising(r,_self): raise QuietException
         return r
 
-    def orient(selection="(all)", state=0, animate=0, _self=cmd):
+    def orient(selection="(all)", state=0, animate=0, *, _self=cmd):
         '''
 DESCRIPTION
 
@@ -341,19 +343,12 @@ SEE ALSO
 
     zoom, origin, reset
         '''
-        r = DEFAULT_ERROR
         # preprocess selection
         selection = selector.process(selection)
-        #
-        try:
-            _self.lock(_self)
-            r = _cmd.orient(_self._COb,"("+selection+")",int(state)-1,float(animate))
-        finally:
-            _self.unlock(r,_self)
-        if _self._raising(r,_self): raise QuietException
-        return r
+        with _self.lockcm:
+            return _cmd.orient(_self._COb,"("+selection+")",int(state)-1,float(animate))
 
-    def move(axis, distance, _self=cmd):
+    def move(axis, distance, *, _self=cmd):
         '''
 DESCRIPTION
 
@@ -376,16 +371,10 @@ SEE ALSO
 
     turn, rotate, translate, zoom, center, clip
         '''
-        r = DEFAULT_ERROR
-        try:
-            _self.lock(_self)
-            r = _cmd.move(_self._COb,str(axis),float(distance))
-        finally:
-            _self.unlock(r,_self)
-        if _self._raising(r,_self): raise QuietException
-        return r
+        with _self.lockcm:
+            return _cmd.move(_self._COb,str(axis),float(distance))
 
-    def enable(name='all', parents=0, _self=cmd):
+    def enable(name='all', parents=0, *, _self=cmd):
         '''
 DESCRIPTION
 
@@ -426,24 +415,16 @@ SEE ALSO
 
     show, hide, disable
         '''
-        r = DEFAULT_ERROR
         if name[0]=='(':
             selection = selector.process(name)
-            try:
-                _self.lock(_self)
+            with _self.lockcm:
                 r = _cmd.onoff_by_sele(_self._COb,selection,1)
-            finally:
-                _self.unlock(r,_self)
         else:
-            try:
-                _self.lock(_self)
+            with _self.lockcm:
                 r = _cmd.onoff(_self._COb,str(name),1,int(parents));
-            finally:
-                _self.unlock(r,_self)
-        if _self._raising(r,_self): raise QuietException
         return r
 
-    def disable(name='all',_self=cmd):
+    def disable(name='all', *, _self=cmd):
         '''
 DESCRIPTION
 
@@ -465,21 +446,13 @@ SEE ALSO
 
     show, hide, enable   
         '''
-        r = DEFAULT_ERROR
         if name[0]=='(':
             selection = selector.process(name)
-            try:
-                _self.lock(_self)
+            with _self.lockcm:
                 r = _cmd.onoff_by_sele(_self._COb,selection,0)
-            finally:
-                _self.unlock(r,_self)
         else:
-            try:
-                _self.lock(_self)
+            with _self.lockcm:
                 r = _cmd.onoff(_self._COb,str(name),0,0);
-            finally:
-                _self.unlock(r,_self)
-        if _self._raising(r,_self): raise QuietException
         return r
 
     def _rep_to_repmask(rep):
@@ -489,7 +462,7 @@ SEE ALSO
             repn |= repmasks[rep]
         return repn
 
-    def toggle(representation="lines", selection="all", _self=cmd):
+    def toggle(representation="lines", selection="all", *, _self=cmd):
         '''
 DESCRIPTION
 
@@ -519,9 +492,7 @@ SEE ALSO
 
     show, hide
         '''
-        r = DEFAULT_ERROR
-        try:
-            _self.lock(_self)
+        with _self.lockcm:
             if representation == 'object':
                 repn = -2
             else:
@@ -529,9 +500,6 @@ SEE ALSO
                 # preprocess selection
                 selection = selector.process(selection)
             r = _cmd.toggle(_self._COb,str(selection),int(repn));
-        finally:
-            _self.unlock(r,_self)
-        if _self._raising(r,_self): raise QuietException
         return r
 
     def _showhide(rep, selection, value, _self):
@@ -542,15 +510,13 @@ SEE ALSO
 
         selection = selector.process(selection) or "all"
         repn = _rep_to_repmask(rep)
-        r = DEFAULT_ERROR
 
         with _self.lockcm:
             r = _cmd.showhide(_self._COb, str(selection), int(repn), value)
 
-        if _self._raising(r,_self): raise QuietException
         return r
 
-    def show(representation="wire", selection="", _self=cmd):
+    def show(representation="wire", selection="", *, _self=cmd):
         '''
 DESCRIPTION
 
@@ -587,7 +553,7 @@ SEE ALSO
 '''
         return _showhide(representation, selection, 1, _self)
 
-    def show_as(representation="wire", selection="", _self=cmd):
+    def show_as(representation="wire", selection="", *, _self=cmd):
         '''
 DESCRIPTION
 
@@ -627,7 +593,7 @@ SEE ALSO
         '''
         return _showhide(representation, selection, 2, _self)
 
-    def hide(representation="everything", selection="",_self=cmd):
+    def hide(representation="everything", selection="", *, _self=cmd):
         '''
 DESCRIPTION
 
@@ -664,7 +630,7 @@ SEE ALSO
         return _showhide(representation, selection, 0, _self)
 
 
-    def get_view(output=1, quiet=1, _self=cmd):
+    def get_view(output=1, quiet=1, *, _self=cmd):
         '''
 DESCRIPTION
 
@@ -719,15 +685,12 @@ SEE ALSO
     set_view
     '''
 
-        r = DEFAULT_ERROR
-        try:
-            _self.lock(_self)
+        with _self.lockcm:
             r = _cmd.get_view(_self._COb)
-        finally:
-            _self.unlock(r,_self)
-        if is_ok(r):
+
+        if True:
             output = int(output)
-            if len(r):
+            if True:
                 if (_self.get_setting_int("logging") != 0) and (output<3):
                     if not quiet:
                         print(" get_view: matrix written to log file.")
@@ -765,11 +728,9 @@ SEE ALSO
                   "  %14.9f, %14.9f, %14.9f,\\\n"%r[19:22] +
                   "  %14.9f, %14.9f, %14.9f )\n"%r[22:25])
             r = r[0:3]+r[4:7]+r[8:11]+r[16:25]
-        elif _self._raising(r,_self):
-            raise QuietException
         return r
 
-    def set_view(view,animate=0,quiet=1,hand=1,_self=cmd):
+    def set_view(view,animate=0,quiet=1,hand=1, *, _self=cmd):
         r'''
 DESCRIPTION
 
@@ -799,21 +760,15 @@ SEE ALSO
 
     get_view
     '''
-        r = DEFAULT_ERROR
-        if cmd.is_string(view):
-            try:
-                view = eval(re.sub(r"[^0-9,\-\)\(\.]","",view))
-            except:
-                traceback.print_exc()
-                print("Error: bad view argument; should be a sequence of 18 floats.")
-                raise QuietException
+        if isinstance(view, (str, bytes)):
+            view = safe_list_eval(view)
+
         if len(view)!=18:
-            print("Error: bad view argument; should be a sequence of 18 floats.")
-            raise QuietException
-        else:
-            try:
-                _self.lock(_self)
-                r = _cmd.set_view(_self._COb,(
+            raise pymol.CmdException(
+                "bad view argument; should be a sequence of 18 floats")
+
+        with _self.lockcm:
+            r = _cmd.set_view(_self._COb,(
                     float(view[ 0]),float(view[ 1]),float(view[ 2]),0.0,
                     float(view[ 3]),float(view[ 4]),float(view[ 5]),0.0,
                     float(view[ 6]),float(view[ 7]),float(view[ 8]),0.0,
@@ -822,12 +777,9 @@ SEE ALSO
                     float(view[12]),float(view[13]),float(view[14]),
                     float(view[15]),float(view[16]),float(view[17])),
                     int(quiet),float(animate),int(hand))
-            finally:
-                _self.unlock(r,_self)
-        if _self._raising(r,_self): raise QuietException
         return r
 
-    def view(key, action='recall', animate=-1,_self=cmd):
+    def view(key, action='recall', animate=-1, *, _self=cmd):
         '''
 DESCRIPTION
 
@@ -897,14 +849,11 @@ SEE ALSO
                         print(" view: '%s' deleted."%key)
 
 
-    def get_viewport(output=1, quiet=1, _self=cmd):
+    def get_viewport(output=1, quiet=1, *, _self=cmd):
         '''
 DESCRIPTION
 
     "get_viewport" returns and optionally prints out the screen viewport size
-
-    If a log file is currently open, get_viewport will not write the view
-    matrix to the screen unless the "output" parameter is 2.
 
 USAGE
 
@@ -912,105 +861,82 @@ USAGE
 
 ARGUMENTS
 
-    output = 0: output matrix to screen
+    output = 0: do not print to screen
 
-    output = 1: do not Output matrix to screen
+    output = 1 {default}: print to screen if not logging and not quiet
 
     output = 2: force output to screen even if log file is open
-
-    output = 3: return formatted string instead of a list
 
 PYMOL API
 
     cmd.get_viewport(output=1, quiet=1)
 
     '''
+        output = int(output)
 
-        r = DEFAULT_ERROR
-        try:
-            _self.lock(_self)
+        with _self.lockcm:
             r = _cmd.get_viewport(_self._COb)
-        finally:
-            _self.unlock(r,_self)
-        if is_ok(r):
-            if len(r):
-                if (_self.get_setting_int("logging") != 0) and (output<3):
-                    if not quiet:
-                        print(" get_viewport: data written to log file.")
-                    _self.log("_ viewport (\\\n","cmd.viewport((\\\n")
-                    _self.log("_  %14.9f, %14.9f )\n"% r)
-                    if output<2: # suppress if we have a log file open
-                        output=0
-                if output and (not quiet) and (output<3):
-                    print("### cut below here and paste into script ###")
-                    print("viewport %4d, %4d"% r)
-                    print("### cut above here and paste into script ###")
-            if output==3:
-                return ("viewport ( %14.9f, %14.9f )\n"% r)
-        elif _self._raising(r,_self):
-            raise QuietException
+
+        if _self.get_setting_int("logging") and output < 3:
+            _self.log(f"_ viewport {r[0]}, {r[1]}\n", f"cmd.viewport{r}\n")
+            if not quiet:
+                print(" get_viewport: data written to log file.")
+            if output < 2:  # suppress if we have a log file open
+                output = 0
+
+        if (0 < output < 3) and not quiet:
+            print("### cut below here and paste into script ###")
+            print("viewport %4d, %4d" % r)
+            print("### cut above here and paste into script ###")
+
+        if output == 3:
+            colorprinting.warning(" Warning: get_viewport(3) is deprecated")
+            return "viewport ( %4d, %4d )\n" % r
+
         return r
 
     def get_vis(_self=cmd):
-        r = DEFAULT_ERROR
-        try:
-            _self.lock(_self)
-            r = _cmd.get_vis(_self._COb)
-        finally:
-            _self.unlock(r,_self)
-        if _self._raising(r,_self): raise QuietException
-        return r
+        with _self.lockcm:
+            return _cmd.get_vis(_self._COb)
 
-    def set_vis(dict,_self=cmd):
-        r = DEFAULT_ERROR
-        try:
-            _self.lock(_self)
-            r = _cmd.set_vis(_self._COb,dict)
-        finally:
-            _self.unlock(r,_self)
-        if _self._raising(r,_self): raise QuietException
-        return r
+    def set_vis(dict, *, _self=cmd):
+        with _self.lockcm:
+            return _cmd.set_vis(_self._COb, dict)
 
-    def get_colorection(key,_self=cmd):
-        r = DEFAULT_ERROR
-        try:
-            _self.lock(_self)
-            r = _cmd.get_colorection(_self._COb,key)
-        finally:
-            _self.unlock(r,_self)
-        if _self._raising(r,_self): raise QuietException
-        return r
+    def get_colorection(key, *, _self=cmd):
+        with _self.lockcm:
+            return _cmd.get_colorection(_self._COb, key)
 
-    def set_colorection(dict,key,_self=cmd):
-        r = DEFAULT_ERROR
-        try:
-            _self.lock(_self)
-            r = _cmd.set_colorection(_self._COb,dict,key)
-        finally:
-            _self.unlock(r,_self)
-        if _self._raising(r,_self): raise QuietException
-        return r
+    def set_colorection(dict,key, *, _self=cmd):
+        with _self.lockcm:
+            return _cmd.set_colorection(_self._COb, dict, key)
 
-    def del_colorection(dict,key,_self=cmd):
-        r = DEFAULT_ERROR
-        try:
-            _self.lock(_self)
-            r = _cmd.del_colorection(_self._COb,dict,key)
-        finally:
-            _self.unlock(r,_self)
-        if _self._raising(r,_self): raise QuietException
-        return r
+    def del_colorection(dict,key, *, _self=cmd):
+        with _self.lockcm:
+            return _cmd.del_colorection(_self._COb, dict, key)
 
     def get_scene_list(_self=cmd):
         with _self.lockcm:
             return _cmd.get_scene_order(_self._COb)
+
+    def get_scene_thumbnail(name, _self=cmd):
+        with _self.lockcm:
+            return _cmd.get_scene_thumbnail(_self._COb, name)
+
+    def get_scene_message(name, _self=cmd):
+        with _self.lockcm:
+            return _cmd.get_scene_message(_self._COb, name)
+
+    def set_scene_message(name, message, _self=cmd):
+        with _self.lockcm:
+            return _cmd.set_scene_message(_self._COb, name, message)
 
     def chain_session(_self=cmd):
         import os
         # assumes locked interpreter
         r = 0
         session_file = str(_self.get("session_file"))
-        re_pat = re.compile("[0-9]+\.")
+        re_pat = re.compile(r"[0-9]+\.")
         if len(session_file): # find next session file, if it exists
             mo = re_pat.search(session_file)
             if mo is not None:
@@ -1023,15 +949,15 @@ PYMOL API
                         new_file = re_pat.sub(new_pat, session_file)
                         # try both PSE and PSW
                         if not os.path.exists(new_file):
-                            new_file = re.sub("\.pse$",".psw",new_file,re.I)
+                            new_file = re.sub(r"\.pse$",".psw",new_file,re.I)
                         if not os.path.exists(new_file):
-                            new_file = re.sub("\.psw$",".pse",new_file,re.I)
+                            new_file = re.sub(r"\.psw$",".pse",new_file,re.I)
                         if os.path.exists(new_file):
                             _self.do("_ cmd.load(r'''"+new_file+"''',format='psw')")
                             return 1
         return 0
 
-    def scene_order(names,sort=0,location='current',quiet=1,_self=cmd):
+    def scene_order(names,sort=0,location='current',quiet=1, *, _self=cmd):
         '''
 DESCRIPTION
 
@@ -1055,9 +981,12 @@ EXAMPLES
     scene_order F6 F4 F3 
     scene_order 003 006 004, location=top
 
+    # if names have spaces
+    cmd.scene_order(["name 1", "name 2"])
+
 PYMOL API
 
-    cmd.scene_order(string names, string sort, string location)
+    cmd.scene_order(names: Union[list, str], sort: str, location: str)
 
 SEE ALSO
 
@@ -1068,6 +997,9 @@ SEE ALSO
         if is_string(sort):
             sort=boolean_dict[boolean_sc.auto_err(sort,'sort option')]
 
+        if isinstance(names, str):
+            names = names.split()
+
         with _self.lockcm:
             return _cmd.scene_order(_self._COb, names, sort, location)
 
@@ -1077,7 +1009,7 @@ SEE ALSO
                 and wiz.__class__.__name__ == 'Message'
                 and hasattr(wiz, 'from_scene')) else None
 
-    def scene_recall_message(message, _self=cmd):
+    def scene_recall_message(message, *, _self=cmd):
         '''
         INTERNAL, DO NOT USE.
         Display a scene message.
@@ -1100,7 +1032,7 @@ SEE ALSO
 
     def scene(key='auto', action='recall', message=None, view=1,
               color=1, active=1, rep=1, frame=1, animate=-1,
-              new_key=None, hand=1, quiet=1, sele="all", _self=cmd):
+              new_key=None, hand=1, quiet=1, sele="all", *, _self=cmd):
         '''
 DESCRIPTION
 
@@ -1181,14 +1113,15 @@ SEE ALSO
                 _self.quit()
 
         # call C function
-        with _self.lockcm:
-            r = _cmd.scene(_self._COb, key, action, message, int(view),
-                    int(color), int(active), int(rep), int(frame),
-                    float(animate), new_key, int(hand), sele)
+        def func():
+            with _self.lockcm:
+                return _cmd.scene(_self._COb, key, action, message, int(view),
+                                    int(color),
+                                    int(active), int(rep), int(frame),
+                                    float(animate), new_key, int(hand),
+                                    int(quiet), sele)
 
-        # autocomplete
-        if action in ('store', 'delete') or action.startswith('insert_'):
-            _self._pymol._scene_dict_sc.rebuild(_self.get_scene_list())
+        r = _self._call_with_opengl_context(func)
 
         # for presentation auto quit
         pymol._scene_quit_on_action = action
@@ -1197,10 +1130,9 @@ SEE ALSO
 
     def _legacy_scene(key='auto', action='recall', message=None, view=1,
               color=1, active=1, rep=1, frame=1, animate=-1,
-              new_key=None, hand=1, quiet=1, _self=cmd):
+              new_key=None, hand=1, quiet=1, *, _self=cmd):
         ''' FOR INTERNAL USE ONLY. Stores and deletes <=1.7.4 compatible scenes. '''
         pymol=_self._pymol
-        r = DEFAULT_SUCCESS
         view = int(view)
         rep = int(rep)
         color = int(color)
@@ -1209,8 +1141,7 @@ SEE ALSO
         quiet = int(quiet)
         animate = 0
 
-        try:
-            _self.lock(_self) # manipulating global data, so need lock
+        with _self.lockcm:
             if key=='*':
                 if action=='clear':
                     for key in pymol._scene_dict:
@@ -1251,23 +1182,20 @@ SEE ALSO
                     ]
                 else:
                     raise ValueError('action=' + action)
-        finally:
-            _self.unlock(r,_self)
-        return r
 
-    def session_save_views(session,_self=cmd):
+    def session_save_views(session, *, _self=cmd):
         pymol=_self._pymol
         session['view_dict']=copy.deepcopy(pymol._view_dict)
         return 1
 
-    def session_restore_views(session,_self=cmd):
+    def session_restore_views(session, *, _self=cmd):
         pymol=_self._pymol
         if 'view_dict' in session:
             pymol._view_dict=copy.deepcopy(session['view_dict'])
             pymol._view_dict_sc.rebuild(list(pymol._view_dict.keys()))
         return 1
 
-    def session_restore_scenes(session,_self=cmd):
+    def session_restore_scenes(session, *, _self=cmd):
         # Restore scenes from old session files (<= 1.7.4)
 
         if 'scene_dict' in session:
@@ -1297,8 +1225,6 @@ SEE ALSO
 
         if 'scene_order' in session:
             _self.scene_order(' '.join(session['scene_order']))
-
-        _self._pymol._scene_dict_sc.rebuild(_self.get_scene_list())
 
         return 1
 
@@ -1336,7 +1262,7 @@ SEE ALSO
 
         _self.scene(key, 'store', scene_list[5], view, color, active, rep, frame)
 
-    def stereo(toggle='on', quiet=1, _self=cmd):
+    def stereo(toggle='on', quiet=1, *, _self=cmd):
         '''
 DESCRIPTION
 
@@ -1370,7 +1296,7 @@ PYMOL API
             return _cmd.stereo(_self._COb, toggle)
 
 
-    def turn(axis, angle, _self=cmd):
+    def turn(axis, angle, *, _self=cmd):
         '''
 DESCRIPTION
 
@@ -1394,17 +1320,12 @@ SEE ALSO
 
     move, rotate, translate, zoom, center, clip
         '''
-        r = DEFAULT_ERROR
-        try:
-            _self.lock(_self)
+        with _self.lockcm:
             r = _cmd.turn(_self._COb,str(axis),float(angle))
-        finally:
-            _self.unlock(r,_self)
-        if _self._raising(r,_self): raise QuietException
         return r
 
 
-    def full_screen(toggle=-1, _self=cmd):
+    def full_screen(toggle=-1, *, _self=cmd):
         '''
 DESCRIPTION
 
@@ -1435,7 +1356,7 @@ NOTES
             return _self._do("full_screen %s" % (toggle), echo=0)
 
 
-    def rock(mode=-1,_self=cmd):
+    def rock(mode=-1, *, _self=cmd):
         '''
 DESCRIPTION
 
@@ -1449,16 +1370,11 @@ PYMOL API
 
     cmd.rock()
         '''
-        r = DEFAULT_ERROR
-        try:
-            _self.lock(_self)
+        with _self.lockcm:
             r = _cmd.rock(_self._COb,int(mode))
-        finally:
-            _self.unlock(r,_self)
-        if _self._raising(r,_self): raise QuietException
         return r
 
-    def label(selection="(all)", expression="", quiet=1,_self=cmd):
+    def label(selection="(all)", expression="", quiet=1, *, _self=cmd):
         '''
 DESCRIPTION
 
@@ -1501,35 +1417,17 @@ NOTES
         # preprocess selection
         selection = selector.process(selection)
         #
-        r = DEFAULT_ERROR
-        try:
-            _self.lock(_self)
-            if len(str(expression))==0:
-                r= _cmd.label(_self._COb,"("+str(selection)+")",'',quiet)
-            else:
-                r = _cmd.label(_self._COb,"("+str(selection)+")",str(expression),quiet)
-        finally:
-            _self.unlock(r,_self)
-        if _self._raising(r,_self): raise QuietException
-        return r
+        with _self.lockcm:
+            return _cmd.label(_self._COb, selection, expression, quiet)
 
-    def label2(selection="(all)", expression="", quiet=1,_self=cmd):
+    def label2(selection="(all)", expression="", quiet=1, *, _self=cmd):
         # preprocess selection
         selection = selector.process(selection)
         #
-        r = DEFAULT_ERROR
-        try:
-            _self.lock(_self)
-            if len(str(expression))==0:
-                r= _cmd.label2(_self._COb,"("+str(selection)+")",'',quiet)
-            else:
-                r = _cmd.label2(_self._COb,"("+str(selection)+")",str(expression),quiet)
-        finally:
-            _self.unlock(r,_self)
-        if _self._raising(r,_self): raise QuietException
-        return r
+        with _self.lockcm:
+            return _cmd.label2(_self._COb, selection, expression, quiet)
 
-    def window(action='show', x=0, y=0, width=0, height=0, _self=cmd):
+    def window(action='show', x=0, y=0, width=0, height=0, *, _self=cmd):
         '''
 DESCRIPTION
 
@@ -1547,9 +1445,7 @@ PYMOL API
         action = window_sc.auto_err(action,'action')
         action = window_dict[str(action)]
 
-        r = DEFAULT_ERROR
-        try:
-            _self.lock(_self)
+        with _self.lockcm:
             from pymol.gui import get_qtwindow as getPyMOLWindow
             qt_window = getPyMOLWindow()
             if qt_window:
@@ -1557,12 +1453,9 @@ PYMOL API
                 qt_window.window_cmd(action, int(x),int(y),int(width),int(height))
             else:
                 r = _cmd.window(_self._COb,action,int(x),int(y),int(width),int(height))
-        finally:
-            _self.unlock(r,_self)
-        if _self._raising(r,_self): raise QuietException
         return r
 
-    def viewport(width=-1,height=-1,_self=cmd):
+    def viewport(width=-1,height=-1, *, _self=cmd):
         '''
 DESCRIPTION
 
@@ -1576,25 +1469,22 @@ PYMOL API
 
     cmd.viewport(int width, int height)
         '''
-        r = None
         if cmd.is_string(width) and height == -1:
             width = _self.safe_eval(width)
             if _self.is_sequence(width):
+                colorprinting.warning(" Warning: Tuple-syntax (parentheses) "
+                                      "for viewport is deprecated")
                 width, height = width
 
         if not cmd.is_gui_thread():
             _self.do("viewport %d,%d"%(int(width),int(height)),0)
-        else:
-            try:
-                _self.lock(_self)
-                r = _cmd.viewport(_self._COb,int(width),int(height))
-            finally:
-                _self.unlock(r,_self)
-        if _self._raising(r,_self): raise QuietException
-        return r
+            return None
+
+        with _self.lockcm:
+            return _cmd.viewport(_self._COb, int(width), int(height))
 
 
-    def bg_color(color="black", _self=cmd):
+    def bg_color(color="black", *, _self=cmd):
         '''
 DESCRIPTION
 
@@ -1629,13 +1519,8 @@ PYMOL API
 
         '''
         color = _self._interpret_color(_self,color)
-        r = DEFAULT_ERROR
-        try:
-            _self.lock(_self)
+        with _self.lockcm:
             r = _cmd.bg_color(_self._COb,str(color))
-        finally:
-            _self.unlock(r,_self)
-        if _self._raising(r,_self): raise QuietException
         return r
 
     cartoon_dict = {
@@ -1649,11 +1534,12 @@ PYMOL API
         'dumbbell'    : 6,
         'putty'       : 7,
         'dash'        : 8,
+        'cylinder'    : 9,
     }
 
     cartoon_sc = Shortcut(cartoon_dict.keys())
 
-    def cartoon(type, selection="(all)", _self=cmd):
+    def cartoon(type, selection="(all)", *, _self=cmd):
         '''
 DESCRIPTION
 
@@ -1684,23 +1570,17 @@ NOTES
     SHEET records.
     
     '''
-        # preprocess selection
+# preprocess selection
         selection = selector.process(selection)
         #
         type = cartoon_dict[cartoon_sc.auto_err(str(type),'type')];
-        r = DEFAULT_ERROR
-        try:
-            _self.lock(_self)
-            r = _cmd.cartoon(_self._COb,"("+str(selection)+")",int(type))
-        finally:
-            _self.unlock(r,_self)
-        if _self._raising(r,_self): raise QuietException
-        return r
+        with _self.lockcm:
+            return _cmd.cartoon(_self._COb, selection, int(type))
 
     def _ray(width,height,antialias,angle,shift,renderer,quiet,_self=cmd):
         r = DEFAULT_ERROR
         try:
-            _self.lock_without_glut(_self)
+            _self.lock_without_glut()
             try:
                 _cmd.set_busy(_self._COb,1)
                 r = _cmd.render(_self._COb,int(width),int(height),
@@ -1711,14 +1591,13 @@ NOTES
             finally:
                 _cmd.set_busy(_self._COb,0)
         finally:
-            _self.unlock(r,_self)
-        if _self._raising(r,_self): raise QuietException
+            _self.unlock(r)
         return r
 
-    def capture(quiet=1, _self=cmd):
+    def capture(quiet=1, *, _self=cmd):
         _self.draw(antialias=-2,quiet=quiet)
 
-    def draw(width=0, height=0, antialias=-1, quiet=1, _self=cmd):
+    def draw(width=0, height=0, antialias=-1, quiet=1, *, _self=cmd):
         '''
 DESCRIPTION
 
@@ -1768,19 +1647,16 @@ SEE ALSO
             _self.mstop()
         if _self.get_setting_boolean("sculpting"):
             _self.set("sculpting","off",quiet=1)
-        # make sure that there aren't any pending display events
-        # TODO breaks QOpenGLWidget
-        # _self.refresh()
         #
-        r = DEFAULT_ERROR
-        try:
-            _self.lock(_self)
-            r = _cmd.draw(_self._COb,int(width),int(height),
+        def func():
+            with _self.lockcm:
+                # make sure that there aren't any pending display events
+                # TODO could this be fixed with PYMOL-3328 (SceneUpdate)?
+                _cmd.refresh_now(_self._COb)
+
+                return _cmd.draw(_self._COb,int(width),int(height),
                           int(antialias),int(quiet))
-        finally:
-            _self.unlock(r,_self)
-        if _self._raising(r,_self): raise QuietException
-        return r
+        return _self._call_with_opengl_context(func)
 
     def ray(width=0, height=0, antialias=-1, angle=0.0, shift=0.0,
             renderer=-1, quiet=1, async_=0, _self=cmd, **kwargs):
@@ -1861,7 +1737,6 @@ SEE ALSO
         if _self.rock(-2)>0:
             _self.rock(0)
         #
-        r = DEFAULT_ERROR
         if not async_:
             r = _ray(*arg_tup)
         else:
@@ -1869,7 +1744,6 @@ SEE ALSO
             render_thread.setDaemon(1)
             render_thread.start()
             r = DEFAULT_SUCCESS
-        if _self._raising(r,_self): raise QuietException
         return r
 
     def refresh(_self=cmd):
@@ -1891,12 +1765,12 @@ SEE ALSO
 
     rebuild
         '''
+        if _self.is_gui_thread():
+            return _self._refresh()
         with _self.lockcm:
-            if _self.is_gui_thread():
-                return _cmd.refresh_now(_self._COb)
             return _self._do("_ cmd._refresh()")
 
-    def reset(object='',_self=cmd):
+    def reset(object='', *, _self=cmd):
         '''
 DESCRIPTION
 
@@ -1918,13 +1792,8 @@ PYMOL API
 
 
     def dirty(_self=cmd): # OBSOLETE?
-        r = DEFAULT_ERROR
-        try:
-            _self.lock(_self)
+        with _self.lockcm:
             r = _cmd.dirty(_self._COb)
-        finally:
-            _self.unlock(r,_self)
-        if _self._raising(r,_self): raise QuietException
         return r
 
     def meter_reset(_self=cmd):
@@ -1937,16 +1806,11 @@ USAGE
 
     meter_reset
         '''
-        r = DEFAULT_ERROR
-        try:
-            _self.lock(_self)
+        with _self.lockcm:
             r = _cmd.reset_rate(_self._COb)
-        finally:
-            _self.unlock(r,_self)
-        if _self._raising(r,_self): raise QuietException
         return r
 
-    def load_png(filename, movie=1, stereo=-1, quiet=0, _self=cmd):
+    def load_png(filename, movie=1, stereo=-1, quiet=0, *, _self=cmd):
         '''
 DESCRIPTION
 
@@ -1963,18 +1827,13 @@ NOTES
     
     '''
 
-        r = DEFAULT_ERROR
         filename = _self.exp_path(str(filename))
-        try:
-            _self.lock(_self)
-            r = _cmd.load_png(_self._COb,str(filename),int(movie),int(stereo),int(quiet))
-        finally:
-            _self.unlock(r,_self)
-        if _self._raising(r,_self): raise QuietException
-        return r
+        with _self.lockcm:
+            return _cmd.load_png(_self._COb, filename, int(movie), int(stereo),
+                                 int(quiet))
 
 
-    def rebuild(selection='all',representation='everything',_self=cmd):
+    def rebuild(selection='all',representation='everything', *, _self=cmd):
         '''
 DESCRIPTION
 
@@ -2002,16 +1861,10 @@ SEE ALSO
         selection = selector.process(selection)
         representation = repres_sc.auto_err(representation,'representation')
         repn = repres[representation];
-        r = DEFAULT_ERROR
-        try:
-            _self.lock(_self)
-            r = _cmd.rebuild(_self._COb,selection,repn)
-        finally:
-            _self.unlock(r,_self)
-        if _self._raising(r,_self): raise QuietException
-        return r
+        with _self.lockcm:
+            return _cmd.rebuild(_self._COb, selection, repn)
 
-    def recolor(selection='all', representation='everything', _self=cmd):
+    def recolor(selection='all', representation='everything', *, _self=cmd):
         '''
 DESCRIPTION
 
@@ -2043,17 +1896,11 @@ SEE ALSO
         selection = selector.process(selection)
         representation = repres_sc.auto_err(representation,'representation')
         repn = repres[representation];
-        r = DEFAULT_ERROR
-        try:
-            _self.lock(_self)
-            r = _cmd.recolor(_self._COb,selection,repn)
-        finally:
-            _self.unlock(r,_self)
-        if _self._raising(r,_self): raise QuietException
-        return r
+        with _self.lockcm:
+            return _cmd.recolor(_self._COb, selection, repn)
 
 
-    def color(color, selection="(all)", quiet=1, flags=0, _self=cmd):
+    def color(color, selection="(all)", quiet=1, flags=0, *, _self=cmd):
         '''
 DESCRIPTION
 
@@ -2092,17 +1939,12 @@ EXAMPLE
         selection = selector.process(selection)
         color = _self._interpret_color(_self,str(color))
 
-        r = DEFAULT_ERROR
-        try:
-            _self.lock(_self)
-            r = _cmd.color(_self._COb,str(color),str(selection),int(flags),int(quiet))
-        finally:
-            _self.unlock(r,_self)
-        if _self._raising(r,_self): raise QuietException
-        return r
+        with _self.lockcm:
+            return _cmd.color(_self._COb, str(color), str(selection),
+                              int(flags), int(quiet))
 
 
-    def color_deep(color, name='all', quiet=1, _self=cmd):
+    def color_deep(color, name='all', quiet=1, *, _self=cmd):
         '''
 DESCRIPTION
 
@@ -2133,7 +1975,7 @@ SEE ALSO
     }
 
     def spectrumany(expression, colors, selection='(all)', minimum=None,
-            maximum=None, quiet=1, interpolation='rgb', _self=cmd):
+            maximum=None, quiet=1, interpolation='rgb', *, _self=cmd):
         '''
 DESCRIPTION
 
@@ -2221,7 +2063,7 @@ DESCRIPTION
 
     def spectrum(expression="count", palette="rainbow",
                  selection="(all)", minimum=None, maximum=None,
-                 byres=0, quiet=1, interpolation='rgb', _self=cmd):
+                 byres=0, quiet=1, interpolation='rgb', *, _self=cmd):
 
         '''
 DESCRIPTION
@@ -2300,18 +2142,14 @@ PYMOL API
         # preprocess selection
         selection = selector.process(selection)
         #
-        r = DEFAULT_ERROR
-        try:
-            _self.lock(_self)
+        with _self.lockcm:
             r = _cmd.spectrum(_self._COb,str(selection),str(expression),
                                     float(minimum),float(maximum),
                                     int(first),int(last),str(prefix),
                                     int(digits),int(byres),int(quiet))
-        finally:
-            _self.unlock(r,_self)
         return r
 
-    def set_color(name, rgb, mode=0, quiet=1, _self=cmd):
+    def set_color(name, rgb, mode=0, quiet=1, *, _self=cmd):
         '''
 DESCRIPTION
 
@@ -2351,30 +2189,21 @@ PYMOL API
     cmd.set_color(string name, list-of-numbers rgb, int mode )
 
         '''
-        r = DEFAULT_ERROR
-        if _self.is_string(rgb):
+        if isinstance(rgb, (str, bytes)):
             rgb = safe_list_eval(rgb)
-        if not (isinstance(rgb,list) or isinstance(rgb,tuple)):
-            print("Error: color specification must be a list such as [ 1.0, 0.0, 0.0 ]")
-        elif len(rgb)!=3:
-            print("Error: color specification must be a list such as [ 1.0, 0.0, 0.0 ]")
-        else:
-            rgb = [float(rgb[0]),float(rgb[1]),float(rgb[2])]
-            if (rgb[0]>1.0) or (rgb[1]>1.0) or (rgb[2]>1.0):
-                # these days, we'll accept 0-1 or 0-255, so long as [1,1,1] is white
-                rgb[0] = rgb[0]/255.0
-                rgb[1] = rgb[1]/255.0
-                rgb[2] = rgb[2]/255.0
-            try:
-                _self.lock(_self)
-                if len(rgb)==3:
-                    r = _cmd.colordef(_self._COb,str(name),rgb[0],rgb[1],rgb[2],int(mode),int(quiet))
-                    _self._invalidate_color_sc(_self)
-                else:
-                    print("Error: invalid color.")
-            finally:
-                _self.unlock(r,_self)
-        if _self._raising(r,_self): raise QuietException
+
+        if not isinstance(rgb, (list, tuple)) or len(rgb) != 3:
+            raise pymol.CmdException(
+                "color specification must be a list such as [ 1.0, 0.0, 0.0 ]")
+
+        rgb = [float(c) for c in rgb]
+        if rgb[0] > 1.0 or rgb[1] > 1.0 or rgb[2] > 1.0:
+            rgb = [c / 0xFF for c in rgb]
+
+        with _self.lockcm:
+            r = _cmd.colordef(_self._COb, str(name), rgb[0], rgb[1], rgb[2],
+                              int(mode), int(quiet))
+            _self._invalidate_color_sc()
         return r
 
 # Aliases for Mother England.
@@ -2385,4 +2214,18 @@ PYMOL API
     recolour = recolor
 
 
-    from . import setting
+def ipython_image(*args, _self=cmd, **kwargs):
+    """Render the scene and return the image as an IPython.display.Image.
+
+    All arguments are forwarded to cmd.png().
+
+    @rtype IPython.display.Image
+    """
+    import os, tempfile
+    from IPython.display import Image
+    filename = tempfile.mktemp(".png")
+    _self.png(filename, *args, **kwargs)
+    try:
+        return Image(filename)
+    finally:
+        os.unlink(filename)

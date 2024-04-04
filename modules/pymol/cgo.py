@@ -12,8 +12,6 @@
 #-*
 #Z* -------------------------------------------------------------------
 
-from __future__ import print_function
-
 from chempy import cpv
 #import popen2
 import os
@@ -66,20 +64,21 @@ ALPHA              = 25.0
 QUADRIC            = 26.0 # NOTE: Only works with ellipsoids and disks
 CONE               = 27.0
 
+PICK_COLOR         = 31.0 # 0x1F [PICK_COLOR, index, bond/cPickable_t]
+
+BEZIER             = 66.0 # 0x42
+
 LIGHTING           = float(0x0B50)
 
-def molauto(*arg,**kw):
-    _self = kw.get('_self',cmd)
-    name = "mols"
-    sele = "(all)"
-    marg = "-nice"
-    la = len(arg)
-    if la:
-        name = arg[0]
-    if la>1:
-        sele = arg[1]
-    if la>2:
-        marg = arg[2]
+# enum cPickable_t:
+cPickableAtom = -1.0
+cPickableLabel = -2.0
+cPickableGadget = -3.0
+cPickableNoPick = -4.0
+cPickableThrough = -5.0
+
+
+def molauto(name="mols", sele="(all)", marg="-nice", _self=cmd):
     _self.save("molauto.pdb",sele)
     print("molauto %s -nocentre molauto.pdb | molscript -r > molauto.r3d"%marg)
     os.system("molauto %s -nocentre molauto.pdb | molscript -r > molauto.r3d"%marg)
@@ -166,10 +165,7 @@ def from_r3d(fname):
     result = DEFAULT_ERROR
     input = None
     if '://' in fname:
-        try:
-            from urllib import urlopen
-        except ImportError:
-            from urllib.request import urlopen
+        from urllib.request import urlopen
         input = urlopen(fname)
     elif os.path.exists(fname):
         input = open(fname)
@@ -456,7 +452,7 @@ def from_plystr(contents, surfacenormals=True, alphaunit=1.):
     PLY - Polygon File Format
     '''
     import sys
-    if sys.version_info[0] == 3 and isinstance(contents, bytes):
+    if isinstance(contents, bytes):
         contents = contents.decode(errors='ignore')
 
     lines_iter = iter(contents.splitlines())
@@ -612,9 +608,9 @@ def from_plystr(contents, surfacenormals=True, alphaunit=1.):
                         obj.append(vertex['nz'])
 
                     obj.append(VERTEX)
-                    obj.append(vertex['x'] * 100)
-                    obj.append(vertex['y'] * 100)
-                    obj.append(vertex['z'] * 100)
+                    obj.append(vertex['x'])
+                    obj.append(vertex['y'])
+                    obj.append(vertex['z'])
             obj.append(END)
 
     obj.append(STOP)

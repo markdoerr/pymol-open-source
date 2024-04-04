@@ -17,23 +17,23 @@ Z* -------------------------------------------------------------------
 #include"os_python.h"
 
 #include"os_gl.h"
-#include"OOMac.h"
 #include"MemoryDebug.h"
 #include"Feedback.h"
 #include"P.h"
 #include"PConv.h"
 #include"VFont.h"
+#include "CGO.h"
 
 #define VFONT_MASK 0xFF
 
-typedef struct {
-  int face;
-  float size;
-  int style;
-  ov_diff offset[VFONT_MASK + 1];
-  float advance[VFONT_MASK + 1];
-  float *pen;
-} VFontRec;
+struct VFontRec {
+  int face{};
+  float size{};
+  int style{};
+  ov_diff offset[VFONT_MASK + 1]{};
+  float advance[VFONT_MASK + 1]{};
+  float* pen{};
+};
 
 struct _CVFont {
   VFontRec **Font;
@@ -44,7 +44,7 @@ struct _CVFont {
 static VFontRec *VFontRecNew(PyMOLGlobals * G)
 {
   int a;
-  OOAlloc(G, VFontRec);
+  auto I = new VFontRec();
   for(a = 0; a <= VFONT_MASK; a++) {
     I->advance[a] = 0.0F;
     I->offset[a] = -1;
@@ -173,8 +173,12 @@ int VFontIndent(PyMOLGlobals * G, int font_id, const char *text, float *pos, flo
 }
 
 #ifndef _PYMOL_NOPY
+/**
+ * @pre GIL
+ */
 static int VFontRecLoad(PyMOLGlobals * G, VFontRec * I, PyObject * dict)
-{                               /* assumes blocked Python interpreter */
+{
+  assert(PyGILState_Check());
 
   ov_diff used = 0;
   int ok = true;
@@ -258,7 +262,7 @@ static int VFontRecLoad(PyMOLGlobals * G, VFontRec * I)
 static void VFontRecFree(PyMOLGlobals * G, VFontRec * I)
 {
   VLAFreeP(I->pen);
-  OOFreeP(I);
+  DeleteP(I);
 }
 
 int VFontInit(PyMOLGlobals * G)

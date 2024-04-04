@@ -56,6 +56,9 @@ class _loadable:
     mmtfstr = 72
     map = 73      # unspecified CCP4 or MRC map
     mrc = 74
+    dxstr = 75    # DX file (APBS)
+    mapstr = 76   # unspecified CCP4 or MRC map
+    mrcstr = 77
 
 class loadable(_loadable):
     @classmethod
@@ -75,6 +78,9 @@ _load2str = { loadable.pdb : loadable.pdbstr,
               loadable.mol2 : loadable.mol2str,
               loadable.mmod : loadable.mmodstr,
               loadable.ccp4 : loadable.ccp4str,
+              loadable.mrc : loadable.mrcstr,
+              loadable.map : loadable.mapstr,
+              loadable.dx : loadable.dxstr,
               loadable.xyz  : loadable.xyzstr,
               loadable.sdf2 : loadable.sdf2str}
 
@@ -129,7 +135,14 @@ stereo_dict = {'on':-2,'off':0,'0':0,'1':-2,'swap':-1,
 
 stereo_sc = Shortcut(stereo_dict.keys())
 
-space_sc = Shortcut(['cmyk','rgb','pymol'])
+space_dict = {
+    'cmyk': "$PYMOL_DATA/pymol/cmyk.png",
+    'pymol': 'pymol',
+    'rgb': 'rgb',
+    'greyscale': 'greyscale',
+}
+
+space_sc = Shortcut(space_dict)
 
 window_dict = { 'show' : 1, 'hide' : 0, 'position' : 2, 'size' : 3,
                 'box' : 4, 'maximize' : 5, 'fit' : 6, 'focus' : 7,

@@ -6,8 +6,6 @@ License: BSD-2-Clause
 
 '''
 
-from __future__ import print_function
-
 import os
 import sys
 import pymol
@@ -138,8 +136,7 @@ DESCRIPTION
     if len(plugins) == 0:
         initialize(-2)
     if name not in plugins:
-        print(' Error: no such plugin')
-        return
+        raise pymol.CmdException('no such plugin')
     info = plugins[name]
     if info.loaded:
         if not int(quiet):
@@ -244,8 +241,7 @@ class PluginInfo(object):
             if cmd.is_string(s):
                 return s
         except SyntaxError as e:
-            if sys.version_info[0] > 2:
-                return 'WARNING: Plugin not Python 3.x compatible: ' + str(e)
+            return 'WARNING: Plugin not Python 3.x compatible: ' + str(e)
         except:
             pass
 
@@ -275,10 +271,7 @@ class PluginInfo(object):
 
             # do not use self.loaded here
             if force and self.module is not None:
-                if sys.version_info[0] > 2:
-                    from importlib import reload
-                else:
-                    from __builtin__ import reload
+                from importlib import reload
                 reload(self.module)
             else:
                 __import__(self.mod_name, level=0)
@@ -419,14 +412,6 @@ def initialize(pmgapp=-1):
     pmgapp == -1: Autoloading but no legacyinit
     else:         Autoloading and legacyinit
     '''
-
-    # check for obsolete development version of pymolplugins
-    if 'pymolplugins' in sys.modules:
-        from .legacysupport import tkMessageBox
-        tkMessageBox.showwarning('WARNING',
-                '"pymolplugins" now integrated into PyMOL as "pymol.plugins"! '
-                'Please remove the old pymolplugins module and delete ~/.pymolrc_plugins.py')
-
     if os.path.exists(PYMOLPLUGINSRC):
         from pymol import parsing
         try:

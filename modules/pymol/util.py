@@ -12,13 +12,7 @@
 #-*
 #Z* -------------------------------------------------------------------
 
-from __future__ import print_function
-
 import sys
-if sys.version_info[0] == 2:
-    _next_method_name = 'next'
-else:
-    _next_method_name = '__next__'
 
 cmd = __import__("sys").modules["pymol.cmd"]
 import pymol
@@ -116,7 +110,7 @@ ARGUMENTS
         _self.get_area(tmpSel, load_b=1)
         _self.spectrum("b", palette, tmpSel)
         _self.iterate(tmpSel, "l_a(color)", space={'l_a': l.append})
-        _self.alter(orgSel, "color=l_n()", space={'l_n': getattr(iter(l), _next_method_name)})
+        _self.alter(orgSel, "color=l_n()", space={'l_n': getattr(iter(l), '__next__')})
 
         _self.recolor(orgSel)
     finally:
@@ -790,17 +784,18 @@ def cbc(selection='(all)',first_color=7,quiet=1,legacy=0,_self=cmd):
             print(" util.cbc: color %s, (chain %s)" % (color, a))
         _self.color(color, "(chain %s and (%s))" % (a, selection), quiet=quiet)
 
-def color_objs(selection='(all)',quiet=1,_self=cmd):
+def color_objs(selection='all', quiet=1, _self=cmd):
     cmd=_self
     '''
-    Color all chains a different color
+    Color all objects a different color
     '''
     c = 0
     for a in cmd.get_names('public_nongroup_objects',selection=selection):
         if (selection!='all') and (selection!='(all)'):
+            cmd.set_object_color(a, _color_cycle[c])
             cmd.color(_color_cycle[c],"(?%s and (%s))"%(a,selection),quiet=quiet)
         else:
-            cmd.color(_color_cycle[c],"(?%s)"%(a),quiet=quiet)
+            cmd.color(_color_cycle[c], a, quiet=quiet)
         c = (c + 1) % _color_cycle_len
 
 def color_deep(color, name='all', quiet=1, _self=cmd):
@@ -1066,7 +1061,15 @@ DESCRIPTION
     _self.enable(name)
 
 
-def get_sasa_relative(selection='all', state=1, vis=-1, var='b', quiet=1, outfile='', _self=cmd):
+def get_sasa_relative(selection='all',
+                      state=1,
+                      vis=-1,
+                      var='b',
+                      quiet=1,
+                      outfile='',
+                      *,
+                      subsele='all',
+                      _self=cmd):
     '''
 DESCRIPTION
 
@@ -1097,10 +1100,18 @@ ARGUMENTS
 
     outfile = str: filename, write to file instead of log window {default: }
 
+    subsele = str: Sub-selection, e.g. "sidechain" {default: all}
+
 EXAMPLE
 
     fetch 1ubq, async=0
     get_sasa_relative polymer
+
+    # side-chain exposure, excluding C-alpha atom
+    get_sasa_relative polymer, subsele=sidechain
+
+    # side-chain exposure, including C-alpha atom
+    get_sasa_relative polymer, subsele=sidechain guide
 
 PYTHON API
 
@@ -1129,14 +1140,16 @@ SEE ALSO
             _self.get_area('?%s & ?%s' % (sele, model), state, load_b=1)
 
         resarea = collections.defaultdict(float)
-        _self.iterate(sele, 'resarea[model,segi,chain,resi] += b', space=locals())
+        _self.iterate(f"{sele} & ({subsele})",
+                      'resarea[model,segi,chain,resi] += b',
+                      space=locals())
 
         for key in resarea:
             _self.create(tripepname, 'byres (/%s/%s/%s/`%s extend 1)' % key, state, 1, zoom=0)
             _self.get_area(tripepname, 1, load_b=1)
 
             resarea_exposed = [0.0]
-            _self.iterate('/' + tripepname + '/%s/%s/`%s' % key[1:],
+            _self.iterate(f"/{tripepname}/{key[1]}/{key[2]}/`{key[3]} & ({subsele})",
                     'resarea_exposed[0] += b', space=locals())
             _self.delete(tripepname)
 

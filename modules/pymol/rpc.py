@@ -14,13 +14,8 @@
   Modified 2013-04-17 Thomas Holder, Schrodinger, Inc.
 """
 
-from __future__ import print_function
-
 import sys
-if sys.version_info[0] == 2:
-  import SimpleXMLRPCServer
-else:
-  import xmlrpc.server as SimpleXMLRPCServer
+import xmlrpc.server as SimpleXMLRPCServer
 import threading,os,tempfile
 from pymol import cmd,cgo
 

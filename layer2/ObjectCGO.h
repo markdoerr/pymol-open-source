@@ -22,22 +22,25 @@ Z* -------------------------------------------------------------------
 #include"PyMOLObject.h"
 #include"CGO.h"
 
-typedef struct ObjectCGOState {
-  CGO *origCGO;
-  CGO *renderCGO;
+struct ObjectCGOState {
+  pymol::cache_ptr<CGO> origCGO;
+  pymol::cache_ptr<CGO> renderCGO;
+  PyMOLGlobals* G;
   bool renderWithShaders, hasTransparency, cgo_lighting, hasOpaque;
-} ObjectCGOState;
+  ObjectCGOState(PyMOLGlobals* G);
+  ObjectCGOState(const ObjectCGOState& other);
+};
 
-struct ObjectCGO : public CObject {
-  ObjectCGOState *State = nullptr;
-  int NState = 0;
+struct ObjectCGO : public pymol::CObject {
+  std::vector<ObjectCGOState> State;
   ObjectCGO(PyMOLGlobals* G);
-  ~ObjectCGO();
+  ObjectCGO(const ObjectCGO& other);
 
   // virtual methods
   void update() override;
   void render(RenderInfo* info) override;
-  void invalidate(int rep, int level, int state) override;
+  void invalidate(cRep_t rep, cRepInv_t level, int state) override;
+  pymol::CObject* clone() const override;
   int getNFrame() const override;
 };
 

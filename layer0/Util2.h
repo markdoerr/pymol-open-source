@@ -7,6 +7,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <string>
 #include <vector>
 
@@ -21,7 +22,7 @@ std::vector<std::string> strsplit(const std::string &s, char delim=0);
 bool cstrlessnat(const char * a, const char * b);
 bool strlessnat(const std::string& a, const std::string& b);
 
-/*
+/**
  * C string comparison class
  */
 struct cstrless_t {
@@ -65,18 +66,23 @@ std::string join_to_string(PrintableTs&&... ts)
 
 namespace string_format_detail
 {
-template <typename T,
-    enable_if_t<std::is_same<remove_cvref_t<T>, std::string>::value>* = nullptr>
-const char* fwdArgs(T&& t)
+template <typename T> const T& fwdArgs(const T& t)
+{
+#if defined(__clang__) || !defined(__GNUC__) || __GNUC__ >= 5
+  // Not available in GCC 4.8
+  static_assert(std::is_trivially_copyable<T>::value, "");
+#endif
+  return t;
+}
+
+inline const char* fwdArgs(const std::string& t)
 {
   return t.c_str();
 }
 
-template <typename T,
-    enable_if_t<!std::is_same<remove_cvref_t<T>, std::string>::value>* = nullptr>
-T&& fwdArgs(T&& t)
+inline const char* fwdArgs(const pymol::zstring_view& t)
 {
-  return std::forward<T>(t);
+  return t.c_str();
 }
 
 template <typename... FmtArgs>
@@ -103,7 +109,7 @@ std::string string_format_impl(const char* const fmt, FmtArgs&&... fmtargs)
 template <std::size_t N, typename... FmtArgs>
 std::string string_format(const char (&fmt)[N], FmtArgs&&... fmtargs)
 {
-  static_assert(N > 0, "Format string must not be empty");
+  static_assert(N > 1, "Format string must not be empty");
   return string_format_detail::string_format_impl(
       fmt, string_format_detail::fwdArgs(std::forward<FmtArgs>(fmtargs))...);
 }
@@ -121,5 +127,46 @@ inline bool starts_with(pymol::zstring_view str, pymol::zstring_view pre)
 }
 
 double pretty_f2d(float v);
+
+/**
+ * Compares two strings with consideration of case sensitivity
+ * @param str1 first string
+ * @param str2 second string
+ * @param case_insensitive determines whether the comparison should not consider
+ * case
+ */
+
+bool string_equal_case(pymol::zstring_view str1, pymol::zstring_view str2,
+    bool case_insensitive = true);
+
+template <typename T> struct cache_value {
+  using value_type = T;
+
+  value_type value = value_type{};
+
+  cache_value() = default;
+
+  cache_value(T t)
+      : value(std::move(t))
+  {
+  }
+
+  cache_value(const cache_value&) {}
+  cache_value& operator=(const cache_value&) { return *this; }
+  cache_value(cache_value&& other)
+  {
+    std::swap(value, other.value);
+  }
+  cache_value& operator=(cache_value&& other)
+  {
+    std::swap(value, other.value);
+    return *this;
+  }
+
+  operator T&() { return value; }
+};
+
+template <typename T, std::size_t N>
+using cache_array = std::array<cache_value<T>, N>;
 
 } // namespace pymol

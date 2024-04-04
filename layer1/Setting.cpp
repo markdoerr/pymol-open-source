@@ -22,7 +22,7 @@ Z* -------------------------------------------------------------------
 #include"os_std.h"
 
 #include"Base.h"
-#include"OOMac.h"
+#include"Err.h"
 #include"MemoryDebug.h"
 #include"Ortho.h"
 #include"Setting.h"
@@ -38,25 +38,25 @@ Z* -------------------------------------------------------------------
 #include"Wizard.h"
 #include"Seq.h"
 #include"PyMOLOptions.h"
-#include"OVContext.h"
 #include"ShaderMgr.h"
 #include"Sphere.h"
 #include"Selector.h"
 #include"Parse.h"
+#include "Feedback.h"
 
 #ifdef _PYMOL_OPENVR
 #include"OpenVRMode.h"
 #endif
 
-/*
+/**
  * Setting level info table
  *
  * Levels are not hierarchical at the atom/bond level, that's why a simple
  * sorted enumeration is not sufficient.
  *
- * global < object < object-state
- *                   object-state < atom < atom-state
- *                   object-state < bond < bond-state
+ *     global < object < object-state
+ *                       object-state < atom < atom-state
+ *                       object-state < bond < bond-state
  */
 const SettingLevelInfoType SettingLevelInfo[] = {
   {"unused"        , 0x00}, // 0b00000000
@@ -74,10 +74,10 @@ const SettingLevelInfoType SettingLevelInfo[] = {
 #define SETTINGINFO_IMPLEMENTATION
 #include "SettingInfo.h"
 
-template <> const char * SettingGet<const char *>(int index, const CSetting * I);
+template <> const char * _SettingGet<const char *>(int index, const CSetting * I);
 
 // get level name for setting index (for feedback)
-const char * SettingLevelGetName(PyMOLGlobals * G, int index) {
+const char * SettingLevelGetName(unsigned index) {
   return SettingLevelInfo[SettingInfo[index].level].name;
 }
 
@@ -94,34 +94,38 @@ bool SettingLevelCheck(PyMOLGlobals * G, int index, unsigned char level) {
 
 /* ================================================================== */
 
-static CSetting *SettingCopyAll(PyMOLGlobals * G, const CSetting * src, CSetting * dst)
+static void SettingRecCopy(
+    int const index, SettingRec const& src, SettingRec& dst)
 {
-  if(!dst) {
-    dst = pymol::calloc<CSetting>(1);
-  } else {
-    SettingPurge(dst);
+  switch (SettingInfo[index].type) {
+  case cSetting_string:
+    dst.set_s(src.str_ ? src.str_->c_str() : nullptr);
+    break;
+  case cSetting_float3:
+    dst.set_3f(src.float3_);
+    break;
+  default:
+    dst.set_i(src.int_);
+    break;
+  }
+  dst.defined = src.defined;
+}
+
+CSetting *SettingCopyAll(PyMOLGlobals * G, const CSetting * src, CSetting * dst)
+{
+  if (!src) {
+    delete dst;
+    return nullptr;
   }
 
-  SettingInit(G, dst);
-
-  if(dst && src) {
-
-    /* simply overwriting existing data (if any) ... in the future we
-       may need to release references etc. before doing this */
-
-    unsigned int size = VLAGetSize(src->info);
-    VLACheck(dst->info, SettingRec, size - 1);
-    UtilCopyMem(dst->info, src->info, sizeof(SettingRec) * size);
-    dst->size = src->size;
-
-    // need to properly copy strings
-    for (int index = 0; index < cSetting_INIT; ++index) {
-      if (SettingInfo[index].type == cSetting_string
-          && src->info[index].str_) {
-        dst->info[index].str_ = new std::string(*src->info[index].str_);
-      }
-    }
+  if (!dst) {
+    dst = SettingNew(G);
   }
+
+  for (int index = 0; index < cSetting_INIT; ++index) {
+    SettingRecCopy(index, src->info[index], dst->info[index]);
+  }
+
   return dst;
 }
 
@@ -132,35 +136,25 @@ void SettingStoreDefault(PyMOLGlobals * G)
 
 void SettingPurgeDefault(PyMOLGlobals * G)
 {
-  if(G->Default) {
-    SettingPurge(G->Default);
-    FreeP(G->Default);
-    G->Default = NULL;
-  }
+  DeleteP(G->Default);
 }
 
-void SettingUniqueDetachChain(PyMOLGlobals * G, int unique_id)
+void SettingUniqueDetachChain(PyMOLGlobals* G, int unique_id)
 {
-  CSettingUnique *I = G->SettingUnique;
-  OVreturn_word result;
-  if(OVreturn_IS_OK(result = OVOneToOne_GetForward(I->id2offset, unique_id))) {
-    int offset = result.word;
-    int next;
+  CSettingUnique* I = G->SettingUnique;
+  auto offsetIt = I->id2offset.find(unique_id);
+  if (offsetIt == I->id2offset.end()) {
+    return;
+  }
+  int offset = offsetIt->second;
+  I->id2offset.erase(offsetIt);
 
-    OVOneToOne_DelForward(I->id2offset, unique_id);
-
-    {
-      SettingUniqueEntry *entry;
-      while(offset) {
-        entry = I->entry + offset;
-        next = entry->next;
-        entry->next = I->next_free;
-        I->next_free = offset;
-        offset = next;
-      }
-    }
-  } else {
-    /* uncaught error */
+  while (offset) {
+    auto entry = &I->entry[offset];
+    auto next = entry->next;
+    entry->next = I->next_free;
+    I->next_free = offset;
+    offset = next;
   }
 }
 
@@ -169,14 +163,13 @@ static void SettingUniqueExpand(PyMOLGlobals * G)
   CSettingUnique *I = G->SettingUnique;
 
   if(!I->next_free) {
-    int new_n_alloc = (I->n_alloc * 3) / 2;
-    int a;
-    VLACheck(I->entry, SettingUniqueEntry, new_n_alloc);
-    for(a = I->n_alloc; a < new_n_alloc; a++) {
+    int new_n_alloc = (I->entry.size() * 3) / 2;
+    auto sizeBefore = I->entry.size();
+    I->entry.resize(sizeBefore + new_n_alloc, SettingUniqueEntry{});
+    for(int a = sizeBefore; a < new_n_alloc; a++) {
       I->entry[a].next = I->next_free;
       I->next_free = a;
     }
-    I->n_alloc = new_n_alloc;
   }
 }
 
@@ -184,11 +177,11 @@ static
 SettingUniqueEntry *SettingFindSettingUniqueEntry(PyMOLGlobals * G, int unique_id, int setting_id)
 {
   CSettingUnique *I = G->SettingUnique;
-  OVreturn_word result;
-  if(OVreturn_IS_OK(result = OVOneToOne_GetForward(I->id2offset, unique_id))) {
-    SettingUniqueEntry *entry;
-    for (int offset = result.word; offset; offset = entry->next) {
-      entry = I->entry + offset;
+  auto offsetIt = I->id2offset.find(unique_id);
+  if (offsetIt != I->id2offset.end()) {
+    SettingUniqueEntry* entry;
+    for (int offset = offsetIt->second; offset; offset = entry->next) {
+      entry = &I->entry[offset];
       if(entry->setting_id == setting_id) {
         return entry;
       }
@@ -202,7 +195,7 @@ int SettingUniqueCheck(PyMOLGlobals * G, int unique_id, int setting_id)
   return SettingFindSettingUniqueEntry(G, unique_id, setting_id) != NULL;
 }
 
-/*
+/**
  * Return true for convertible types and set int-compatible types to int
  */
 inline bool type_upcast(int &type) {
@@ -248,11 +241,15 @@ bool SettingUniqueGetTypedValuePtr(PyMOLGlobals * G, int unique_id, int setting_
   return true;
 }
 
-/*
+/**
  * Warning: Returns colors as (fff) tuple instead of color index
+ *
+ * @pre GIL
  */
 PyObject *SettingUniqueGetPyObject(PyMOLGlobals * G, int unique_id, int index)
 {
+  assert(PyGILState_Check());
+
   int type = SettingGetType(G, index);
 
   union {
@@ -328,24 +325,24 @@ static void SettingUniqueEntry_Set(SettingUniqueEntry *entry, int value_type, co
   }
 }
 
-/*
+/**
  * Return false if setting was not set (nothing changed)
  */
 bool SettingUniqueUnset(PyMOLGlobals * G, int unique_id, int setting_id)
 {
   auto I = G->SettingUnique;
-  auto result = OVOneToOne_GetForward(I->id2offset, unique_id);
+  auto offsetIt = I->id2offset.find(unique_id);
 
-  if (OVreturn_IS_OK(result)) {
-    for (int prev = 0, offset = result.word; offset;
+  if (offsetIt != I->id2offset.end()) {
+    for (int prev = 0, offset = offsetIt->second; offset;
         prev = offset, offset = I->entry[offset].next) {
       if (I->entry[offset].setting_id != setting_id)
         continue;
 
       if(!prev) {           /* if first entry in list */
-        OVOneToOne_DelForward(I->id2offset, unique_id);
+        I->id2offset.erase(offsetIt);
         if(I->entry[offset].next) {   /* set new list start */
-          OVOneToOne_Set(I->id2offset, unique_id, I->entry[offset].next);
+          I->id2offset[unique_id] = I->entry[offset].next;
         }
       } else {              /* otherwise excise from middle or end */
         I->entry[prev].next = I->entry[offset].next;
@@ -365,19 +362,19 @@ int SettingUniqueSetTypedValue(PyMOLGlobals * G, int unique_id, int setting_id,
 /* set value to NULL in order to delete setting */
 {
   CSettingUnique *I = G->SettingUnique;
-  OVreturn_word result;
   int isset = false;
 
   if (!value) {
     return SettingUniqueUnset(G, unique_id, setting_id);
   }
 
-  if(OVreturn_IS_OK((result = OVOneToOne_GetForward(I->id2offset, unique_id)))) {       /* setting list exists for atom */
-    int offset = result.word;
+  auto offsetIt = I->id2offset.find(unique_id);
+  if (offsetIt != I->id2offset.end()) {       /* setting list exists for atom */
+    int offset = offsetIt->second;
     int prev = 0;
     int found = false;
     while(offset) {
-      SettingUniqueEntry *entry = I->entry + offset;
+      auto entry = &I->entry[offset];
       if(entry->setting_id == setting_id) {
         found = true;           /* this setting is already defined */
 	  if (!SettingUniqueEntry_IsSame(entry, setting_type, value)){
@@ -395,7 +392,7 @@ int SettingUniqueSetTypedValue(PyMOLGlobals * G, int unique_id, int setting_id,
       if(I->next_free) {
         offset = I->next_free;
         {
-          SettingUniqueEntry *entry = I->entry + offset;
+          auto entry = &I->entry[offset];
           I->next_free = entry->next;
           entry->next = 0;
 
@@ -404,7 +401,8 @@ int SettingUniqueSetTypedValue(PyMOLGlobals * G, int unique_id, int setting_id,
             entry->setting_id = setting_id;
             SettingUniqueEntry_Set(entry, setting_type, value);
             isset = true;
-          } else if(OVreturn_IS_OK(OVOneToOne_Set(I->id2offset, unique_id, offset))) {
+          } else {
+            I->id2offset[unique_id] = offset;
             /* create new list */
             entry->setting_id = setting_id;
             SettingUniqueEntry_Set(entry, setting_type, value);
@@ -413,20 +411,19 @@ int SettingUniqueSetTypedValue(PyMOLGlobals * G, int unique_id, int setting_id,
         }
       }
     }
-  } else if(value && (result.status == OVstatus_NOT_FOUND)) {   /* new setting list for atom */
+  } else if(value && offsetIt == I->id2offset.end()) {   /* new setting list for atom */
     if(!I->next_free)
       SettingUniqueExpand(G);
     if(I->next_free) {
       int offset = I->next_free;
-      SettingUniqueEntry *entry = I->entry + offset;
+      auto entry = &I->entry[offset];
 
-      if(OVreturn_IS_OK(OVOneToOne_Set(I->id2offset, unique_id, offset))) {
-        I->next_free = entry->next;
-        entry->setting_id = setting_id;
-        entry->next = 0;
-        SettingUniqueEntry_Set(entry, setting_type, value);
-        isset = true;
-      }
+      I->id2offset[unique_id] = offset;
+      I->next_free = entry->next;
+      entry->setting_id = setting_id;
+      entry->next = 0;
+      SettingUniqueEntry_Set(entry, setting_type, value);
+      isset = true;
     }
   } else {
     /* unhandled error */
@@ -435,8 +432,13 @@ int SettingUniqueSetTypedValue(PyMOLGlobals * G, int unique_id, int setting_id,
 }
 
 #ifndef _PYMOL_NOPY
+/**
+ * @pre GIL
+ */
 bool SettingUniqueSetPyObject(PyMOLGlobals * G, int unique_id, int index, PyObject *value)
 {
+  assert(PyGILState_Check());
+
   if (!value)
     return SettingUniqueUnset(G, unique_id, index);
 
@@ -490,33 +492,28 @@ ok_except1:
 void SettingUniqueResetAll(PyMOLGlobals * G)
 {
   CSettingUnique *I = G->SettingUnique;
-
-  OVOneToOne_Reset(I->id2offset);
-  {
-    int a;
-    I->n_alloc = 10;
-    VLAFreeP(I->entry);
-    I->entry = VLACalloc(SettingUniqueEntry, I->n_alloc);
-    /* note: intentially skip index 0  */
-    for(a = 2; a < 10; a++) {
-      I->entry[a].next = a - 1;
-    }
-    I->next_free = I->n_alloc - 1;
+  I->id2offset.clear();
+  I->entry.clear();
+  I->entry.resize(CSettingUnique::numInitEntries, SettingUniqueEntry{});
+  /* note: intentially skip index 0  */
+  for (int a = 2; a < I->entry.size(); a++) {
+    I->entry[a].next = a - 1; /* 1-based linked list with 0 as sentinel */
   }
+  I->next_free = I->entry.size() - 1;
 }
 
 int SettingUniquePrintAll(PyMOLGlobals * G, int src_unique_id)
 {
   int ok = true;
   CSettingUnique *I = G->SettingUnique;
-  OVreturn_word src_result;
   printf("SettingUniquePrintAll: ");
-  if(OVreturn_IS_OK(src_result = OVOneToOne_GetForward(I->id2offset, src_unique_id))) {
-    int src_offset = src_result.word;
+  auto offsetIt = I->id2offset.find(src_unique_id);
+  if (offsetIt != I->id2offset.end()) {
+    int src_offset = offsetIt->second;
     SettingUniqueEntry *src_entry;
     while(ok && src_offset) {
       {
-	src_entry = I->entry + src_offset;
+	src_entry = &I->entry[src_offset];
 	{
 	  int setting_id = src_entry->setting_id;
 	  int setting_type = SettingInfo[setting_id].type;
@@ -552,23 +549,23 @@ int SettingUniqueCopyAll(PyMOLGlobals * G, int src_unique_id, int dst_unique_id)
 {
   int ok = true;
   CSettingUnique *I = G->SettingUnique;
-  OVreturn_word dst_result;
 
-  if(OVreturn_IS_OK((dst_result = OVOneToOne_GetForward(I->id2offset, dst_unique_id)))) {       /* setting list exists for atom */
+  auto dstOffsetIt = I->id2offset.find(dst_unique_id);
+  if (dstOffsetIt != I->id2offset.end()) {       /* setting list exists for atom */
     PRINTFB(G, FB_Setting, FB_Errors)
       " SettingUniqueCopyAll-Bug: merging settings not implemented\n"
       ENDFB(G);
     ok = false;
-  } else if(dst_result.status == OVstatus_NOT_FOUND) {  /* new setting list for atom */
-    OVreturn_word src_result;
-    if(OVreturn_IS_OK(src_result = OVOneToOne_GetForward(I->id2offset, src_unique_id))) {
+  } else if (dstOffsetIt == I->id2offset.end()) {  /* new setting list for atom */
+    auto srcOffsetIt = I->id2offset.find(src_unique_id);
+    if (srcOffsetIt != I->id2offset.end()) {
       int dst_offset = 0;
-      for (int src_offset = src_result.word; src_offset;
+      for (int src_offset = srcOffsetIt->second; src_offset;
           src_offset = I->entry[src_offset].next) {
         SettingUniqueExpand(G); // this may reallocate I->entry
 
         if (!dst_offset) {
-          OVOneToOne_Set(I->id2offset, dst_unique_id, I->next_free);
+          I->id2offset[dst_unique_id] = I->next_free;
         } else {
           I->entry[dst_offset].next = I->next_free;
         }
@@ -589,45 +586,29 @@ int SettingUniqueCopyAll(PyMOLGlobals * G, int src_unique_id, int dst_unique_id)
 
 static void SettingUniqueInit(PyMOLGlobals * G)
 {
-  CSettingUnique *I = G->SettingUnique;
-
-  if((I = (G->SettingUnique = pymol::calloc<CSettingUnique>(1)))) {
-    I->id2offset = OVOneToOne_New(G->Context->heap);
-    {
-      int a;
-      I->n_alloc = 10;
-      I->entry = VLACalloc(SettingUniqueEntry, I->n_alloc);
-      /* note: intentially skip index 0  */
-      for(a = 2; a < 10; a++) {
-        I->entry[a].next = a - 1;       /* 1-based linked list with 0 as sentinel */
-      }
-      I->next_free = I->n_alloc - 1;
-    }
-  }
+  G->SettingUnique = new CSettingUnique();
+  SettingUniqueResetAll(G);
 }
 
 static void SettingUniqueFree(PyMOLGlobals * G)
 {
-  CSettingUnique *I = G->SettingUnique;
-  VLAFreeP(I->entry);
-  OVOneToOne_Del(I->id2offset);
-  FreeP(I);
+  DeleteP(G->SettingUnique);
 }
 
-/*
+/**
  * For unique_id remapping during partial session loading
  */
 int SettingUniqueConvertOldSessionID(PyMOLGlobals * G, int old_unique_id)
 {
   CSettingUnique *I = G->SettingUnique;
   int unique_id = old_unique_id;
-  if(I->old2new) {
-    OVreturn_word ret;
-    if(OVreturn_IS_OK(ret = OVOneToOne_GetForward(I->old2new, old_unique_id))) {
-      unique_id = ret.word;
+  if (I->old2new) {
+    auto oldIdIt = I->old2new->find(old_unique_id);
+    if (oldIdIt != I->old2new->end()) {
+      unique_id = oldIdIt->second;
     } else {
       unique_id = AtomInfoGetNewUniqueID(G);
-      OVOneToOne_Set(I->old2new, old_unique_id, unique_id);
+      I->old2new->emplace(old_unique_id, unique_id);
     }
   } else {
     AtomInfoReserveUniqueID(G, unique_id);
@@ -635,7 +616,7 @@ int SettingUniqueConvertOldSessionID(PyMOLGlobals * G, int old_unique_id)
   return unique_id;
 }
 
-/*
+/**
  * Return true if the given setting index should not be stored to PSE.
  *
  * Blacklisted are unused and system-dependent settings.
@@ -657,6 +638,7 @@ static bool is_session_blacklisted(int index) {
   case cSetting_cylinder_shader_ff_workaround:
   case cSetting_defer_updates:
   case cSetting_fast_idle:
+  case cSetting_fetch_path:
   case cSetting_internal_feedback:
   case cSetting_internal_gui:
   case cSetting_internal_prompt:
@@ -709,8 +691,13 @@ static bool is_session_blacklisted(int index) {
   return false;
 }
 
+/**
+ * @pre GIL
+ */
 int SettingUniqueFromPyList(PyMOLGlobals * G, PyObject * list, int partial_restore)
 {
+  assert(PyGILState_Check());
+
   int ok = true;
   if(!partial_restore) {
     SettingUniqueResetAll(G);
@@ -768,6 +755,10 @@ int SettingUniqueFromPyList(PyMOLGlobals * G, PyObject * list, int partial_resto
                   case cSetting_boolean:
                     ok = PConvPyIntToInt(PyList_GetItem(entry_list, 2),
                                          &value_store.int_);
+                    if (setting_type == cSetting_color) {
+                      value_store.int_ =
+                          ColorConvertOldSessionIndex(G, value_store.int_);
+                    }
                     break;
                   case cSetting_float:
                     ok = PConvPyFloatToFloat(PyList_GetItem(entry_list, 2),
@@ -795,42 +786,32 @@ int SettingUniqueFromPyList(PyMOLGlobals * G, PyObject * list, int partial_resto
   return ok;
 }
 
+/**
+ * @pre GIL
+ */
 PyObject *SettingUniqueAsPyList(PyMOLGlobals * G)
 {
+  assert(PyGILState_Check());
+
   PyObject *result = NULL;
   CSettingUnique *I = G->SettingUnique;
   {
-    ov_word hidden = 0;
-    OVreturn_word ret;
-    int n_entry = 0;
-    while(1) {
-      ret = OVOneToOne_IterateForward(I->id2offset, &hidden);
-      if(ret.status != OVstatus_YES)
-        break;
-      n_entry++;
-    }
+    auto n_entry = I->id2offset.size();
     result = PyList_New(n_entry);
     if(result) {
-      hidden = 0;
       n_entry = 0;
-      while(1) {
+      for (auto id2offset : I->id2offset) {
         PyObject *setting_list = NULL;
-        int save_offset, unique_id;
-        ret = OVOneToOne_IterateForward(I->id2offset, &hidden);
-
-        if(ret.status != OVstatus_YES)
-          break;
-        unique_id = ret.word;
-        if(OVreturn_IS_OK(ret = OVOneToOne_GetForward(I->id2offset, unique_id))) {
-          int offset = ret.word;
+        auto unique_id = id2offset.first;
+        auto offset = id2offset.second;
+        {
           int n_set = 0;
 
           /* count number of settings for this unique_id */
 
-          SettingUniqueEntry *entry;
-          save_offset = offset;
+          auto save_offset = offset;
           while(offset) {
-            entry = I->entry + offset;
+            auto entry = &I->entry[offset];
             n_set++;
             offset = entry->next;
           }
@@ -842,7 +823,7 @@ PyObject *SettingUniqueAsPyList(PyMOLGlobals * G)
           offset = save_offset;
           while(offset) {
             PyObject *setting_entry = PyList_New(3);
-            entry = I->entry + offset;
+            auto entry = &I->entry[offset];
             int type = SettingInfo[entry->setting_id].type;
             PyList_SetItem(setting_entry, 0, PyInt_FromLong(entry->setting_id));
             PyList_SetItem(setting_entry, 1, PyInt_FromLong(type));
@@ -895,8 +876,13 @@ int SettingSetSmart_i(PyMOLGlobals * G, CSetting * set1, CSetting * set2, int in
   return SettingSetGlobal_i(G, index, value);
 }
 
+/**
+ * @pre GIL
+ */
 int SettingSetGlobalsFromPyList(PyMOLGlobals * G, PyObject * list)
 {
+  assert(PyGILState_Check());
+
   int ok = true;
 
   CSetting *I = G->Setting;
@@ -915,16 +901,26 @@ int SettingSetGlobalsFromPyList(PyMOLGlobals * G, PyObject * list)
   return (ok);
 }
 
+/**
+ * @pre GIL
+ */
 PyObject *SettingGetGlobalsAsPyList(PyMOLGlobals * G)
 {
+  assert(PyGILState_Check());
+
   PyObject *result = NULL;
   CSetting *I = G->Setting;
   result = SettingAsPyList(I);
   return (PConvAutoNone(result));
 }
 
+/**
+ * @pre GIL
+ */
 static PyObject *get_list(CSetting * I, int index, bool incl_blacklisted)
 {
+  assert(PyGILState_Check());
+
   PyObject *result = NULL, *value = NULL;
   int setting_type = SettingInfo[index].type;
 
@@ -960,8 +956,13 @@ static PyObject *get_list(CSetting * I, int index, bool incl_blacklisted)
   return result;
 }
 
+/**
+ * @pre GIL
+ */
 PyObject *SettingAsPyList(CSetting * I, bool incl_blacklisted)
 {
+  assert(PyGILState_Check());
+
   PyObject *result = NULL;
   int a;
 
@@ -1002,8 +1003,13 @@ static int SettingCheckUseShaders(CSetting * I, int quiet)
 }
 
 /*========================================================================*/
+/**
+ * @pre GIL
+ */
 static int set_list(CSetting * I, PyObject * list)
 {
+  assert(PyGILState_Check());
+
   int index = -1;
   int setting_type = -1;
 
@@ -1056,11 +1062,15 @@ ok_except1:
 }
 
 /*========================================================================*/
-/*
+/**
  * Used to set object and object-state level settings from PSEs
+ *
+ * @pre GIL
  */
 CSetting *SettingNewFromPyList(PyMOLGlobals * G, PyObject * list)
 {
+  assert(PyGILState_Check());
+
   int ok = true;
   ov_size size;
   ov_size a;
@@ -1081,8 +1091,13 @@ CSetting *SettingNewFromPyList(PyMOLGlobals * G, PyObject * list)
 }
 
 /*========================================================================*/
+/**
+ * @pre GIL
+ */
 int SettingFromPyList(CSetting * I, PyObject * list)
 {
+  assert(PyGILState_Check());
+
   int ok = true;
   ov_size size;
   ov_size a;
@@ -1102,36 +1117,32 @@ int SettingFromPyList(CSetting * I, PyObject * list)
 }
 
 /*========================================================================*/
-/*
+/**
  * Get the indices of all settings that have changed since last calling
  * this function. Resets the "changed" flag.
  *
- * NOTE: assumes blocked interpreter
- *
- * name: object name or NULL/"" for global settings
- * state: object state
+ * @param name object name or NULL/"" for global settings
+ * @param state object state
  */
 std::vector<int> SettingGetUpdateList(PyMOLGlobals * G, const char * name, int state)
 {
-  CSetting **handle, *I = G->Setting;
-  int a;
-  int n;
+  CSetting* I = G->Setting;
+  pymol::copyable_ptr<CSetting>* handle;
   std::vector<int> result;
 
   if (name && name[0]) {
     // object-state settings
 
-    CObject *obj = ExecutiveFindObjectByName(G, name);
+    pymol::CObject *obj = ExecutiveFindObjectByName(G, name);
 
     if (!obj ||
         !(handle = obj->getSettingHandle(state)) ||
-        !(I = *handle))
+        !(I = handle->get()))
       // not found -> empty list
       return result;
   }
 
-  n = VLAGetSize(I->info);
-  for(a = 0; a < n; a++) {
+  for (int a = 0; a < cSetting_INIT; ++a) {
     if(I->info[a].changed) {
       I->info[a].changed = false;
       result.push_back(a);
@@ -1143,10 +1154,10 @@ std::vector<int> SettingGetUpdateList(PyMOLGlobals * G, const char * name, int s
 
 
 /*========================================================================*/
-void SettingCheckHandle(PyMOLGlobals * G, CSetting ** handle)
+void SettingCheckHandle(PyMOLGlobals * G, pymol::copyable_ptr<CSetting>& handle)
 {
-  if(!*handle)
-    *handle = SettingNew(G);
+  if(!handle)
+    handle.reset(SettingNew(G));
 }
 
 
@@ -1171,7 +1182,7 @@ int SettingGetTextValue(PyMOLGlobals * G, const CSetting * set1, const CSetting 
 }
 
 /*========================================================================*/
-/*
+/**
  * Returns a pointer to the internal string representation if available,
  * or it formats the value into buffer and returns a pointer to buffer.
  */
@@ -1212,7 +1223,7 @@ const char * SettingGetTextPtr(PyMOLGlobals * G, const CSetting * set1, const CS
         case cColorBack:
           strcpy(buffer, "back");
           break;
-        case -1:
+        case cColorDefault:
           strcpy(buffer, "default");
           break;
         default:
@@ -1234,9 +1245,13 @@ const char * SettingGetTextPtr(PyMOLGlobals * G, const CSetting * set1, const CS
 
 #ifndef _PYMOL_NOPY
 /*========================================================================*/
+/**
+ * @pre GIL
+ */
 int SettingSetFromTuple(PyMOLGlobals * G, CSetting * I, int index, PyObject * tuple)
-/* must have interpret locked to make this call */
 {
+  assert(PyGILState_Check());
+
   PyObject *value;
   int type;
   int ok = true;
@@ -1295,8 +1310,6 @@ int SettingStringToTypedValue(PyMOLGlobals * G, int index, const char *st, int *
       }
       if (newvalue != *value){
           *value = newvalue;
-      } else {
-          ok = false;
       }
     break;
   case cSetting_int:
@@ -1304,8 +1317,6 @@ int SettingStringToTypedValue(PyMOLGlobals * G, int index, const char *st, int *
         ok = false;
     } else if (newvalue!=*value){
         *value = newvalue;
-    } else {
-        ok = false;
     }
     break;
   case cSetting_float:
@@ -1313,8 +1324,6 @@ int SettingStringToTypedValue(PyMOLGlobals * G, int index, const char *st, int *
         ok = false;
     } else if (newfvalue != *((float *) value)){
         *(float*)value = newfvalue;
-    } else {
-        ok = false;
     }
     break;
   case cSetting_color:
@@ -1322,8 +1331,6 @@ int SettingStringToTypedValue(PyMOLGlobals * G, int index, const char *st, int *
       int color_index = ColorGetIndex(G, st);
       if (*(value) != color_index){
           *(value) = color_index;
-      } else {
-          ok = false;
       }
     }
     break;
@@ -1396,11 +1403,15 @@ int SettingSetFromString(PyMOLGlobals * G, CSetting * I, int index, const char *
 
 /*========================================================================*/
 #ifndef _PYMOL_NOPY
-/*
+/**
  * Warning: Returns colors as (fff) tuple instead of color index
+ *
+ * @pre GIL
  */
 PyObject *SettingGetPyObject(PyMOLGlobals * G, const CSetting * set1, const CSetting * set2, int index)
-{                               /* assumes blocked python interpeter */
+{
+  assert(PyGILState_Check());
+
   PyObject *result = NULL;
   const float *ptr;
   int type = SettingGetType(G, index);
@@ -1437,8 +1448,13 @@ PyObject *SettingGetPyObject(PyMOLGlobals * G, const CSetting * set1, const CSet
   return result;
 }
 
+/**
+ * @pre GIL
+ */
 PyObject *SettingGetTuple(PyMOLGlobals * G, const CSetting * set1, const CSetting * set2, int index)
-{                               /* assumes blocked python interpeter */
+{
+  assert(PyGILState_Check());
+
   PyObject *result = NULL;
   const float *ptr;
   int type = SettingGetType(G, index);
@@ -1473,25 +1489,30 @@ PyObject *SettingGetTuple(PyMOLGlobals * G, const CSetting * set1, const CSettin
 /*========================================================================*/
 CSetting *SettingNew(PyMOLGlobals * G)
 {
-  OOAlloc(G, CSetting);
-  SettingInit(G, I);
-  return (I);
+  return new CSetting(G);
 }
 
+CSetting::CSetting(const CSetting& other)
+{
+  *this = other;
+}
+
+CSetting& CSetting::operator=(const CSetting& other)
+{
+  for (int index = 0; index < cSetting_INIT; ++index) {
+    SettingRecCopy(index, other.info[index], this->info[index]);
+  }
+  return *this;
+}
 
 /*========================================================================*/
-void SettingPurge(CSetting * I)
+CSetting::~CSetting()
 {
-  if(I) {
-    // need to free strings
-    for(int index = 0; index < cSetting_INIT; ++index) {
-      if (SettingInfo[index].type == cSetting_string) {
-        I->info[index].delete_s();
-      }
+  // need to free strings
+  for (int index = 0; index < cSetting_INIT; ++index) {
+    if (SettingInfo[index].type == cSetting_string) {
+      info[index].delete_s();
     }
-
-    VLAFreeP(I->info);
-    I->size = 0;
   }
 }
 
@@ -1499,55 +1520,26 @@ void SettingPurge(CSetting * I)
 /*========================================================================*/
 void SettingFreeP(CSetting * I)
 {
-  if(I)
-    SettingPurge(I);
-  OOFreeP(I);
+  delete I;
 }
 
 
 /*========================================================================*/
-void SettingInit(PyMOLGlobals * G, CSetting * I)
+CSetting::CSetting(PyMOLGlobals* G)
+    : G(G)
 {
-  I->G = G;
-  I->size = sizeof(int);        /* insures offset is never zero, except when undef */
-  I->info = (SettingRec*) VLAMalloc(cSetting_INIT, sizeof(SettingRec), 5, 1); /* auto-zero */
 }
 
 
 /*========================================================================*/
-/*
- * Return false if type is numeric and default value is non-zero.
- */
-bool SettingIsDefaultZero(int index)
-{
-  switch (SettingInfo[index].type) {
-    case cSetting_boolean:
-    case cSetting_int:
-    case cSetting_float:
-      if (SettingInfo[index].value.i[0] == 0)
-        return true;
-      return false;
-  }
-
-  return true;
-}
-
-
-/*========================================================================*/
-/*
+/**
  * Restore the default value from `src` or `SettingInfo`
  */
 void SettingRestoreDefault(CSetting * I, int index, const CSetting * src)
 {
   // 1) from stored default if provided
   if (src) {
-    UtilCopyMem(I->info + index, src->info + index, sizeof(SettingRec));
-
-    // need to properly copy strings
-    if (SettingInfo[index].type == cSetting_string && src->info[index].str_) {
-      I->info[index].str_ = new std::string(*src->info[index].str_);
-    }
-
+    SettingRecCopy(index, src->info[index], I->info[index]);
     return;
   }
 
@@ -1586,12 +1578,12 @@ void SettingRestoreDefault(CSetting * I, int index, const CSetting * src)
 int SettingUnset(CSetting * I, int index)
 {
   if(I) {
-    SettingRec *sr = I->info + index;
-    if (!sr->defined) {
+    SettingRec& sr = I->info[index];
+    if (!sr.defined) {
       return false;
     }
-    sr->defined = false;
-    sr->changed = true;
+    sr.defined = false;
+    sr.changed = true;
   }
   return true;
 }
@@ -1606,7 +1598,7 @@ int SettingGetType(int index)
 
 /*========================================================================*/
 template <>
-int SettingGet<int>(int index, const CSetting * I)
+int _SettingGet<int>(int index, const CSetting * I)
 {
   PyMOLGlobals *G = I->G;
   int result;
@@ -1631,7 +1623,7 @@ int SettingGet<int>(int index, const CSetting * I)
 
 /*========================================================================*/
 template <>
-bool SettingGet<bool>(int index, const CSetting * I)
+bool _SettingGet<bool>(int index, const CSetting * I)
 {
   PyMOLGlobals *G = I->G;
   switch (SettingInfo[index].type) {
@@ -1649,7 +1641,7 @@ bool SettingGet<bool>(int index, const CSetting * I)
 
 /*========================================================================*/
 template <>
-float SettingGet<float>(int index, const CSetting * I)
+float _SettingGet<float>(int index, const CSetting * I)
 {
   float result;
   PyMOLGlobals *G = I->G;
@@ -1675,7 +1667,7 @@ float SettingGet<float>(int index, const CSetting * I)
 
 /*========================================================================*/
 template <>
-const char * SettingGet<const char *>(int index, const CSetting * I)
+const char * _SettingGet<const char *>(int index, const CSetting * I)
 {
   const char *result;
   PyMOLGlobals *G = I->G;
@@ -1698,7 +1690,7 @@ const char * SettingGet<const char *>(int index, const CSetting * I)
 
 /*========================================================================*/
 template <>
-const float * SettingGet<const float *>(int index, const CSetting * I)
+const float * _SettingGet<const float *>(int index, const CSetting * I)
 {
   if (SettingInfo[index].type != cSetting_float3) {
     PyMOLGlobals *G = I->G;
@@ -1862,11 +1854,9 @@ int SettingSet_3fv(CSetting * I, int index, const float *vector)
 /*========================================================================*/
 int SettingGetIndex(PyMOLGlobals * G, const char *name)
 {
-  OVreturn_word result = get_setting_id(G->PyMOL, name);
-
-  if (OVreturn_IS_OK(result))
-    return result.word;
-
+  if (auto result = get_setting_id(G->PyMOL, name)) {
+    return *result;
+  }
   return -1;
 }
 
@@ -1941,6 +1931,7 @@ void SettingGenerateSideEffects(PyMOLGlobals * G, int index, const char *sele, i
   case cSetting_grid_mode:
     if (!SettingGetGlobal_i(G, cSetting_grid_mode))
       G->ShaderMgr->ResetUniformSet();
+    ExecutiveUpdateSceneMembers(G);
   case cSetting_grid_slot:
     ExecutiveInvalidateGroups(G, false);
     SceneChanged(G);
@@ -2444,8 +2435,8 @@ void SettingGenerateSideEffects(PyMOLGlobals * G, int index, const char *sele, i
     break;
   case cSetting_button_mode_name:
     {
-      int internal_gui_mode = SettingGetGlobal_i(G, cSetting_internal_gui_mode);
-      if (internal_gui_mode){
+      auto internal_gui_mode = SettingGet<InternalGUIMode>(cSetting_internal_gui_mode, G->Setting);
+      if (internal_gui_mode != InternalGUIMode::Default){
 	OrthoInvalidateDoDraw(G);
       }
     }
@@ -2480,6 +2471,13 @@ void SettingGenerateSideEffects(PyMOLGlobals * G, int index, const char *sele, i
     SceneChanged(G);
     break;
   case cSetting_sphere_mode:
+#ifndef _PYMOL_IP_EXTRAS
+    if (SettingGet<int>(G, cSetting_sphere_mode) > 9) {
+      PRINTFB(G, FB_Setting, FB_Warnings)
+        " Setting-Warning: sphere_mode > 9 is not supported in Open-Source "
+        "version of PyMOL\n" ENDFB(G);
+    }
+#endif
     ExecutiveInvalidateRep(G, inv_sele, cRepSphere, cRepInvRep);
     SceneInvalidate(G);
     break;
@@ -2574,6 +2572,7 @@ void SettingGenerateSideEffects(PyMOLGlobals * G, int index, const char *sele, i
   case cSetting_surface_use_shader:
     SceneChanged(G);
     break;
+  case cSetting_isosurface_algorithm:
   case cSetting_surface_negative_visible:
     ExecutiveInvalidateRep(G, inv_sele, cRepSurface, cRepInvRep);
     SceneChanged(G);
@@ -2666,6 +2665,8 @@ void SettingGenerateSideEffects(PyMOLGlobals * G, int index, const char *sele, i
   case cSetting_cartoon_round_helices:
   case cSetting_cartoon_flat_sheets:
   case cSetting_cartoon_refine_normals:
+  case cSetting_cartoon_smooth_cylinder_cycles:
+  case cSetting_cartoon_smooth_cylinder_window:
   case cSetting_cartoon_smooth_loops:
   case cSetting_cartoon_dumbbell_width:
   case cSetting_cartoon_dumbbell_length:
@@ -2734,6 +2735,10 @@ void SettingGenerateSideEffects(PyMOLGlobals * G, int index, const char *sele, i
      ExecutiveInvalidateRep(G, inv_sele, cRepNonbonded, cRepInvRep);
      SceneChanged(G);
      break;
+  case cSetting_cell_centered:
+     ExecutiveInvalidateRep(G, inv_sele, cRepCell, cRepInvRep);
+     SceneChanged(G);
+     break;
   case cSetting_dot_width:
   case cSetting_dot_radius:
   case cSetting_dot_density:
@@ -2747,6 +2752,7 @@ void SettingGenerateSideEffects(PyMOLGlobals * G, int index, const char *sele, i
   case cSetting_bg_gradient:
       ColorUpdateFrontFromSettings(G);
       ExecutiveInvalidateRep(G, inv_sele, cRepAll, cRepInvColor);
+    OrthoBackgroundTextureNeedsUpdate(G);
     G->ShaderMgr->Set_Reload_Bits(RELOAD_VARIABLES);
     SceneChanged(G);
     break;
@@ -2837,8 +2843,12 @@ void SettingGenerateSideEffects(PyMOLGlobals * G, int index, const char *sele, i
   case cSetting_security:
     G->Security = SettingGetGlobal_i(G, cSetting_security);
     break;
-  case cSetting_all_states:
   case cSetting_state:
+    if (SettingGet<int>(G, index) < 0 /* all */) {
+      PRINTFB(G, FB_Setting, FB_Warnings)
+        " Setting-Warning: state can't be less than 0.\n" ENDFB(G);
+    }
+  case cSetting_all_states:
   case cSetting_frame:
     ExecutiveInvalidateSelectionIndicatorsCGO(G);
     SceneInvalidatePicking(G);
@@ -2982,14 +2992,9 @@ void SettingGenerateSideEffects(PyMOLGlobals * G, int index, const char *sele, i
 /*========================================================================*/
 void SettingFreeGlobal(PyMOLGlobals * G)
 {
-  CSetting *I = G->Setting;
   SettingUniqueFree(G);
-  SettingPurge(I);
-  if(G->Default) {
-    SettingPurge(G->Default);
-    FreeP(G->Default);
-  }
-  FreeP(G->Setting);
+  DeleteP(G->Setting);
+  DeleteP(G->Default);
 }
 
 
@@ -3005,9 +3010,8 @@ void SettingInitGlobal(PyMOLGlobals * G, int alloc, int reset_gui, int use_defau
   int (*set_b) (CSetting * I, int index, int value) = SettingSet_b;
 
   if(alloc || !I) {
-    I = (G->Setting = pymol::calloc<CSetting>(1));
+    I = G->Setting = SettingNew(G);
     SettingUniqueInit(G);
-    SettingInit(G, I);
   }
 
   if(G->Default && use_default) {
@@ -3130,17 +3134,20 @@ int SettingCheckFontID(PyMOLGlobals * G, CSetting * set1, CSetting * set2, int f
   return ret;
 }
 
-/*
+/**
  * State index iterator constructor, see Setting.h for documentation.
+ *
+ * @param set Optional object settings (can be NULL)
+ * @param nstate Maximum number of states
  */
-StateIterator::StateIterator(PyMOLGlobals * G, CSetting * set, int state_, int nstate) {
-  if(state_ == -2) {
-    // current state
+StateIterator::StateIterator(
+    PyMOLGlobals* G, CSetting* set, StateIndex_t state_, int nstate)
+{
+  if (state_ == cStateCurrent) {
     state_ = SettingGet_i(G, set, NULL, cSetting_state) - 1;
   }
 
-  if(state_ == -1) {
-    // all states
+  if (state_ == cStateAll) {
     state = 0;
     end = nstate;
   } else {
@@ -3159,11 +3166,56 @@ StateIterator::StateIterator(PyMOLGlobals * G, CSetting * set, int state_, int n
   state--;
 }
 
-/*
+/**
+ * Take settings and number of states from given object.
+ */
+StateIterator::StateIterator(pymol::CObject* obj, StateIndex_t state_)
+    : StateIterator(obj->G, obj->Setting.get(), state_, obj->getNFrame())
+{
+}
+
+StateIteratorV2::StateIteratorV2(
+    pymol::CObject* obj, StateIndex_t state_)
+{
+  auto G = obj->G;
+  auto set = obj->Setting.get();
+  auto nstate = obj->getNFrame();
+  if (state_ == cStateCurrent) {
+    state_ = SettingGet<int>(G, set, nullptr, cSetting_state) - 1;
+  }
+
+  if (state_ == cStateAll) {
+    m_cur = 0;
+    m_end = nstate;
+  } else {
+    // given state or static singleton
+    m_cur = (state_ > 0 && nstate == 1 &&
+                SettingGet<bool>(G, set, nullptr, cSetting_static_singletons))
+                ? 0
+                : state_;
+    m_end = m_cur + 1;
+  }
+  m_cur = std::max(0, m_cur);
+  m_beg = m_cur;
+  m_end = std::min(m_end, nstate);
+
+  m_cur--;
+}
+
+StateIndex_t* StateIteratorV2::begin()
+{
+  return &m_beg;
+}
+StateIndex_t* StateIteratorV2::end()
+{
+  return &m_end;
+}
+
+/**
  * Helper function to init CPyMOL.Setting, a (name: index) dictionary.
  * Called in PyMOL_InitAPI
  */
-bool CPyMOLInitSetting(OVLexicon * Lex, OVOneToOne * Setting) {
+bool CPyMOLInitSetting(OVLexicon * Lex, std::unordered_map<int, int>& Setting) {
   for(int index = 0; index < cSetting_INIT; ++index) {
     auto &rec = SettingInfo[index];
 
@@ -3172,16 +3224,16 @@ bool CPyMOLInitSetting(OVLexicon * Lex, OVOneToOne * Setting) {
 
     OVreturn_word result = OVLexicon_GetFromCString(Lex, rec.name);
 
-    if( !OVreturn_IS_OK(result) ||
-        !OVreturn_IS_OK(OVOneToOne_Set(Setting, result.word, index)))
+    if (!OVreturn_IS_OK(result)) {
       return false;
+    }
+    Setting[result.word] = index;
   }
-
   return true;
 }
 
 #ifndef _PYMOL_NOPY
-/*
+/**
  * Export the settings names to Python a as (name: index) dictionary.
  * Replacement for pymol.settings.SettingIndex
  */
@@ -3204,19 +3256,19 @@ PyObject * SettingGetSettingIndices() {
   return dict;
 }
 
-/*
+/**
  * Return a list of all setting indices for the given unique id
  */
 PyObject * SettingUniqueGetIndicesAsPyList(PyMOLGlobals * G, int unique_id)
 {
   CSettingUnique *I = G->SettingUnique;
   PyObject * list = PyList_New(0);
-  OVreturn_word result;
 
-  if(unique_id && OVreturn_IS_OK(result = OVOneToOne_GetForward(I->id2offset, unique_id))) {
-    SettingUniqueEntry *entry;
-    for (int offset = result.word; offset; offset = entry->next) {
-      entry = I->entry + offset;
+  auto offsetIt = I->id2offset.find(unique_id);
+  if (unique_id && offsetIt != I->id2offset.end()) {
+    SettingUniqueEntry* entry;
+    for (int offset = offsetIt->second; offset; offset = entry->next) {
+      entry = &I->entry[offset];
       PyObject *item = PyInt_FromLong(entry->setting_id);
       PyList_Append(list, item);
       Py_DECREF(item);

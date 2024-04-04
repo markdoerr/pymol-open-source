@@ -12,8 +12,6 @@
 #-*
 #Z* -------------------------------------------------------------------
 
-from __future__ import print_function
-
 if True:
     try:
         from . import selector, internal
@@ -95,6 +93,7 @@ if True:
         '-box' : 33 ,
 
         'mvsz' : 34 ,
+        'clik' : 35 ,
         'dgrt' : 36 ,
         'dgmv' : 37 ,
         'dgmz' : 38 ,
@@ -166,7 +165,7 @@ if True:
 
     ring_dict_sc = Shortcut(ring_dict.keys())
 
-    def config_mouse(ring='three_button', quiet=1, _self=cmd):
+    def config_mouse(ring='three_button', quiet=1, *, _self=cmd):
 
         '''
 DESCRIPTION
@@ -548,7 +547,7 @@ SEE ALSO
           ]
         }
 
-    def find(name, i=0, quiet=1, _self=cmd):
+    def find(name, i=0, quiet=1, *, _self=cmd):
         '''
 DESCRIPTION
 
@@ -557,7 +556,7 @@ DESCRIPTION
         with _self.lockcm:
             return _cmd.scrollto(_self._COb, str(name), int(i))
 
-    def order(names,sort=0,location='current',_self=cmd):
+    def order(names, sort=0, location='current', *, _self=cmd):
         '''
 DESCRIPTION
 
@@ -607,7 +606,7 @@ SEE ALSO
         if _self._raising(r,_self): raise pymol.CmdException
         return r
 
-    def mouse(action=None, quiet=1, _self=cmd):# INTERNAL
+    def mouse(action=None, quiet=1, *, _self=cmd):# INTERNAL
 
         '''
 DESCRIPTION
@@ -686,8 +685,7 @@ USAGE
         _self.refresh_wizard() # refresh mouse config in GUI
         return r
 
-
-    def edit_mode(active=1,quiet=1,_self=cmd):
+    def edit_mode(active=1, quiet=1, *, _self=cmd):
         '''
 DESCRIPTION
 
@@ -718,7 +716,7 @@ DESCRIPTION
                         mouse(action='three_button_viewing',quiet=quiet,_self=_self)
         return DEFAULT_SUCCESS
 
-    def set_key(key,fn=None,arg=(),kw={},_self=cmd):
+    def set_key(key, fn=None, arg=(), kw={}, *, _self=cmd):
         '''
 DESCRIPTION
 
@@ -767,7 +765,7 @@ SEE ALSO
         '''
         if fn is None:
             def decorator(func):
-                set_key(key, func, arg, kw, _self)
+                set_key(key, func, arg, kw, _self=_self)
                 return func
             return decorator
 
@@ -798,7 +796,7 @@ SEE ALSO
 
         return DEFAULT_SUCCESS
 
-    def button(button, modifier, action, _self=cmd):
+    def button(button, modifier, action, *, _self=cmd):
         '''
 DESCRIPTION
 
@@ -869,8 +867,7 @@ SEE ALSO
         if _self._raising(r,_self): raise pymol.CmdException
         return r
 
-
-    def mask(selection="(all)",quiet=1,_self=cmd):
+    def mask(selection="(all)", quiet=1, *, _self=cmd):
         '''
 DESCRIPTION
 
@@ -891,19 +888,13 @@ SEE ALSO
 
     unmask, protect, deprotect, mouse
     '''
-        r = DEFAULT_ERROR
         # preprocess selection
         selection = selector.process(selection)
         #
-        try:
-            _self.lock(_self)
-            r = _cmd.mask(_self._COb,"("+str(selection)+")",1,int(quiet))
-        finally:
-            _self.unlock(r,_self)
-        if _self._raising(r,_self): raise pymol.CmdException
-        return r
+        with _self.lockcm:
+            return _cmd.mask(_self._COb,"("+str(selection)+")",1,int(quiet))
 
-    def unmask(selection="(all)",quiet=1,_self=cmd):
+    def unmask(selection="(all)", quiet=1, *, _self=cmd):
         '''
 DESCRIPTION
 

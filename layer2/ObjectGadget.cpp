@@ -20,7 +20,6 @@ Z* -------------------------------------------------------------------
 #include"os_std.h"
 #include"os_gl.h"
 
-#include"OOMac.h"
 #include"ObjectGadget.h"
 #include"ObjectGadgetRamp.h"
 #include"GadgetSet.h"
@@ -36,7 +35,7 @@ Z* -------------------------------------------------------------------
 
 CGO *ObjectGadgetPyListFloatToCGO(PyObject * list);
 
-int ObjectGadgetGetVertex(ObjectGadget * I, int index, int base, float *v)
+int ObjectGadgetGetVertex(const ObjectGadget * I, int index, int base, float *v)
 {
   GadgetSet *gs;
   int ok = false;
@@ -49,7 +48,7 @@ int ObjectGadgetGetVertex(ObjectGadget * I, int index, int base, float *v)
   return (ok);
 }
 
-int ObjectGadgetSetVertex(ObjectGadget * I, int index, int base, float *v)
+int ObjectGadgetSetVertex(ObjectGadget * I, int index, int base, const float *v)
 {
   GadgetSet *gs;
   int ok = false;
@@ -228,7 +227,6 @@ ObjectGadget *ObjectGadgetTest(PyMOLGlobals * G)
 
   I->GSet[0] = gs;
   I->NGSet = 1;
-  I->Context = 1;
   gs->update();
   ObjectGadgetUpdateExtents(I);
   return (I);
@@ -407,7 +405,7 @@ ObjectGadget::~ObjectGadget()
   auto I = this;
   for(int a = 0; a < I->NGSet; a++)
     if(I->GSet[a]) {
-      I->GSet[a]->fFree();
+      delete I->GSet[a];
       I->GSet[a] = NULL;
     }
 }
@@ -450,11 +448,11 @@ void ObjectGadget::render(RenderInfo * info)
 {
   auto I = this;
   int state = info->state;
-  int pass = info->pass;
-  if(pass < 0 || info->ray || info->pick) {
+  const RenderPass pass = info->pass;
+  if(pass == RenderPass::Transparent || info->ray || info->pick) {
 
     ObjectPrepareContext(I, info);
-    for(StateIterator iter(I->G, I->Setting, state, I->NGSet);
+    for(StateIterator iter(I->G, I->Setting.get(), state, I->NGSet);
         iter.next();) {
       GadgetSet * gs = I->GSet[iter.state];
       gs->render(info);
@@ -464,10 +462,14 @@ void ObjectGadget::render(RenderInfo * info)
 
 
 /*========================================================================*/
-ObjectGadget::ObjectGadget(PyMOLGlobals * G) : CObject(G)
+ObjectGadget::ObjectGadget(PyMOLGlobals * G) : pymol::CObject(G)
 {
   type = cObjectGadget;
   GSet = pymol::vla<GadgetSet*>(10);        /* auto-zero */
 }
 
+pymol::RenderContext ObjectGadget::getRenderContext() const
+{
+  return pymol::RenderContext::UnitWindow;
+}
 

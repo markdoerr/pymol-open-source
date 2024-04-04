@@ -143,6 +143,7 @@ def obj_motion(self_cmd, obj, frame="0"):
             ]
 
 def rep_action(self_cmd, sele, action) :
+    flag_ignore_action = "set" if action == "hide" else "clear"
     return [
         [ 1, 'wire'       , 'cmd.'+action+'("wire"      ,"'+sele+'")' ],
         [ 1, '  lines'    , 'cmd.'+action+'("lines"     ,"'+sele+'")' ],
@@ -163,6 +164,15 @@ def rep_action(self_cmd, sele, action) :
         [ 0, ''           , ''                               ],
         [ 1, 'mesh'       , 'cmd.'+action+'("mesh"      ,"'+sele+'")' ],
         [ 1, 'surface'    , 'cmd.'+action+'("surface"   ,"'+sele+'")' ],
+        [ 1, 'flag ignore', [
+            [ 2, 'flag ignore', ''],
+            [ 1, flag_ignore_action, f'cmd.flag("ignore",{sele!r},{flag_ignore_action!r});cmd.rebuild({sele!r})' ],
+            [ 0, '', '' ],
+            [ 2, '\\272Note:\\559 Atoms with the "ignore"', ''],
+            [ 2, '\\559flag are ignored during surface', ''],
+            [ 2, '\\559calculation. By default, all', ''],
+            [ 2, '\\559non-polymer atoms are ignored.', ''],
+        ]],
         ]
 
 def mol_as(self_cmd, sele):
@@ -975,6 +985,22 @@ def extend(self_cmd, sele):
               [ 1, 'by 6 bonds, residues'  ,'cmd.select("'+sele+'","(byres ('+sele+' extend 6))",enable=1)' ],
               ]
 
+def halogen_bond(self_cmd, sele):
+    return [[2, 'Halogen-bond Interactions:', '']] + [
+        [
+            1, 'halogen-bond', 'cmd.distance("' + sele + '_halogen_bond","' +
+            sele + '","same",reset=1,mode=9)'
+        ],
+    ]
+
+def salt_bridge(self_cmd, sele):
+    return [[2, 'Salt-Bridge Interactions:', '']] + [
+        [
+            1, 'salt-bridge', 'cmd.distance("' + sele + '_salt_bridge","' +
+            sele + '","same",reset=1,mode=10)'
+        ],
+    ]
+
 def polar(self_cmd, sele):
     return [[ 2, 'Polar Contacts:', ''],
               [ 1, 'within selection'  ,
@@ -1027,6 +1053,13 @@ def find(self_cmd, sele):
               [ 1, 'any contacts', [[ 2, 'Any Contacts:', '']] + [
                   [ 1, 'between chains within %.1fA' % d, 'util.interchain_distances("'+sele+'_interchain_any","'+sele+'",cutoff=%f)' % d]
                   for d in (3.0, 3.5, 4.0)
+              ]],
+              [ 1, 'halogen-bond interactions', halogen_bond(self_cmd, sele)],
+              [ 1, 'salt-bridge interactions', salt_bridge(self_cmd, sele)],
+              [ 1, 'pi interactions', [[ 2, 'Pi Interactions:', '']] + [
+                  [1, 'all', 'cmd.pi_interactions("'+sele+'_pi_interactions","'+sele+'",reset=1)'],
+                  [1, 'pi-pi', 'cmd.distance("'+sele+'_pi_pi","'+sele+'","same",reset=1,mode=6)'],
+                  [1, 'pi-cation', 'cmd.distance("'+sele+'_pi_cation","'+sele+'","same",reset=1,mode=7)'],
               ]],
               ]
 

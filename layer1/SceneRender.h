@@ -19,21 +19,36 @@ Z* -------------------------------------------------------------------
 #define _H_SceneRender
 
 #include "Picking.h"
+#include "RenderPass.h"
 
 #include <vector>
 
-void SceneRender(PyMOLGlobals * G, Picking * pick, int x, int y,
-                 Multipick * smp, int oversize_width, int oversize_height,
-                 int click_side, int force_copy);
+enum class SceneRenderWhich {
+  AllObjects,
+  OnlyGadgets,
+  OnlyNonGadgets,
+  GadgetsLast
+};
+
+struct SceneRenderInfo
+{
+  Picking* pick = nullptr;
+  Offset2D mousePos{};
+  Multipick* sceneMultipick = nullptr;
+  Extent2D oversizeExtent{};
+  ClickSide clickSide = ClickSide::None;
+  bool forceCopy = false;
+};
+
+void SceneRender(PyMOLGlobals* G, const SceneRenderInfo& renderInfo);
 void SceneRenderAll(PyMOLGlobals * G, SceneUnitContext * context,
                     float *normal, PickColorManager*,
-                    int pass, int fat, float width_scale,
-                    GridInfo * grid, int dynamic_pass, short which_objects);
+                    RenderPass pass, int fat, float width_scale,
+                    GridInfo * grid, int dynamic_pass, SceneRenderWhich which_objects);
 
-void SceneInitializeViewport(PyMOLGlobals * G, int offscreen);
+void SceneInitializeViewport(PyMOLGlobals* G, bool offscreen);
 
-void GridGetGLViewport(PyMOLGlobals * G, GridInfo * I);
-void GridSetGLViewport(GridInfo * I, int slot);
+void GridSetViewport(PyMOLGlobals* G, GridInfo * I, int slot);
 
 #endif
 

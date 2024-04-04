@@ -12,8 +12,6 @@
 #-*
 #Z* -------------------------------------------------------------------
 
-from __future__ import print_function
-
 import os
 import copy
 import functools
@@ -158,7 +156,9 @@ class Atom(object):
 class Bond:
 
     order   = 1
-    stereo  = 0
+    stereo  = 0  # deprecated
+
+    symmetry_2 = ""  # _geom_bond.site_symmetry_2
 
     def has(self,attr):
         return attr in self.__dict__
@@ -187,10 +187,7 @@ class Storage:
 
     def my_open(self,fname,mode='r'):
         if 'r' in mode and '://' in fname:
-            try:
-                import urllib.request as urllib
-            except ImportError:
-                import urllib
+            import urllib.request as urllib
             return urllib.urlopen(fname)
         elif fname.endswith(".gz") or fname.endswith(".pze") or fname.endswith("pzw"):
             import gzip
@@ -263,8 +260,6 @@ elif 'PYMOL_DATA' in os.environ:
     path = os.environ['PYMOL_DATA'] + '/chempy/'
 elif 'PYMOL_PATH' in os.environ:
     path = os.environ['PYMOL_PATH'] + '/data/chempy/'
-elif 'FREEMOL_MODULES' in os.environ:
-    path = os.environ['FREEMOL_MODULES'] + '/chempy/'
 else:
     path = ''
 

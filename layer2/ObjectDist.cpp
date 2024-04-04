@@ -20,7 +20,6 @@ Z* -------------------------------------------------------------------
 #include"os_std.h"
 
 #include"Base.h"
-#include"OOMac.h"
 #include"Vector.h"
 #include"MemoryDebug.h"
 #include"Err.h"
@@ -34,26 +33,28 @@ Z* -------------------------------------------------------------------
 #include"Feedback.h"
 #include"DistSet.h"
 #include"ListMacros.h"
+#include "Interactions.h"
+#ifdef _PYMOL_INCENTIVE
+#endif
 
-static void ObjectDistFree(ObjectDist * I);
 static void ObjectDistUpdateExtents(ObjectDist * I);
 
 int ObjectDistGetLabelTxfVertex(ObjectDist * I, int state, int index, float *v)
 {
   int result = 0;
-  if(I->DSet) {
+  if(!I->DSet.empty()) {
     if(state < 0)
-      state = SettingGet_i(I->G, NULL, I->Setting, cSetting_state) - 1;
+      state = SettingGet_i(I->G, NULL, I->Setting.get(), cSetting_state) - 1;
     if(state < 0)
       state = SceneGetState(I->G);
-    if(I->NDSet == 1)
+    if(I->DSet.size() == 1)
       state = 0;                /* static singletons always active here it seems */
-    state = state % I->NDSet;
+    state = state % I->DSet.size();
     {
-      DistSet *ds = I->DSet[state];
-      if((!ds) && (SettingGet_b(I->G, I->Setting, NULL, cSetting_all_states))) {
+      DistSet *ds = I->DSet[state].get();
+      if((!ds) && (SettingGet_b(I->G, I->Setting.get(), NULL, cSetting_all_states))) {
         state = 0;
-        ds = I->DSet[state];
+        ds = I->DSet[state].get();
       }
       if(ds) {
         result = DistSetGetLabelVertex(ds, index, v);
@@ -66,20 +67,19 @@ int ObjectDistGetLabelTxfVertex(ObjectDist * I, int state, int index, float *v)
 int ObjectDistMoveLabel(ObjectDist * I, int state, int index, float *v, int mode, int log)
 {
   int result = 0;
-  DistSet *ds;
   /* determine which state we're using */
   if(state < 0)
     state = 0;
-  if(I->NDSet == 1)
+  if(I->DSet.size() == 1)
     state = 0;
-  state = state % I->NDSet;
+  state = state % I->DSet.size();
   if((!I->DSet[state])
-     && (SettingGet_b(I->G, I->Setting, NULL, cSetting_all_states)))
+     && (SettingGet_b(I->G, I->Setting.get(), NULL, cSetting_all_states)))
     state = 0;
   /* find the corresponding distance set, for this state */
-  ds = I->DSet[state];
+  auto ds = I->DSet[state].get();
   if(ds) {
-    result = DistSetMoveLabel(I->DSet[state], index, v, mode);
+    result = DistSetMoveLabel(I->DSet[state].get(), index, v, mode);
     /* force this object to redraw itself; invalidate the Label's coordinates
      * with the new data set, ds */
     ds->invalidateRep(cRepLabel, cRepInvCoord);
@@ -101,17 +101,15 @@ int ObjectDistMoveLabel(ObjectDist * I, int state, int index, float *v, int mode
  */
 int ObjectDistMoveWithObject(ObjectDist * I, struct ObjectMolecule * O) {
   int result = 0, curResult = 0;
-  int i;
-  DistSet* ds;
 
   /* bail if the distance object is empty, or it doesn't have any distances */
-  if (!I || !I->NDSet || !I->DSet ) {
+  if (!I || I->DSet.empty() ) {
     return 0;
   }
 
   /* ask each DistSet to move itself, if required */
-  for (i=0; i<I->NDSet; i++) {
-    ds = I->DSet[i];
+  for (int i=0; i<I->DSet.size(); i++) {
+    auto ds = I->DSet[i].get();
     if (ds) {
       curResult = DistSetMoveWithObject(ds, O);
       result |= curResult;
@@ -130,15 +128,13 @@ void ObjectDistUpdateExtents(ObjectDist * I)
 {
   float maxv[3] = { FLT_MAX, FLT_MAX, FLT_MAX };
   float minv[3] = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
-  int a;
-  DistSet *ds;
 
   /* update extents */
   copy3f(maxv, I->ExtentMin);
   copy3f(minv, I->ExtentMax);
   I->ExtentFlag = false;
-  for(a = 0; a < I->NDSet; a++) {
-    ds = I->DSet[a];
+  for(int a = 0; a < I->DSet.size(); a++) {
+    auto ds = I->DSet[a].get();
     if(ds) {
       if(DistSetGetExtent(ds, I->ExtentMin, I->ExtentMax))
         I->ExtentFlag = true;
@@ -148,12 +144,10 @@ void ObjectDistUpdateExtents(ObjectDist * I)
 
 static PyObject *ObjectDistDSetAsPyList(ObjectDist * I)
 {
-  PyObject *result = NULL;
-  int a;
-  result = PyList_New(I->NDSet);
-  for(a = 0; a < I->NDSet; a++) {
+  auto result = PyList_New(I->DSet.size());
+  for(int a = 0; a < I->DSet.size(); a++) {
     if(I->DSet[a]) {
-      PyList_SetItem(result, a, DistSetAsPyList(I->DSet[a]));
+      PyList_SetItem(result, a, DistSetAsPyList(I->DSet[a].get()));
     } else {
       PyList_SetItem(result, a, PConvAutoNone(Py_None));
     }
@@ -164,17 +158,17 @@ static PyObject *ObjectDistDSetAsPyList(ObjectDist * I)
 static int ObjectDistDSetFromPyList(ObjectDist * I, PyObject * list)
 {
   int ok = true;
-  int a;
   if(ok)
     ok = PyList_Check(list);
   if(ok) {
-    VLACheck(I->DSet, DistSet *, I->NDSet);
-    for(a = 0; a < I->NDSet; a++) {
+    I->DSet.resize(PyList_Size(list));
+    for(int a = 0; a < I->DSet.size(); a++) {
       if(ok){
-        auto *val = PyList_GetItem(list, a);
-        ok = DistSetFromPyList(I->G, val, &I->DSet[a]);
+	CPythonVal *val = CPythonVal_PyList_GetItem(I->G, list, a);	
+        I->DSet[a].reset(DistSetFromPyList(I->G, val));
+	CPythonVal_Free(val);
       }
-      if(ok)
+      if(ok && I->DSet[a])
         I->DSet[a]->Obj = I;
     }
   }
@@ -190,7 +184,8 @@ PyObject *ObjectDistAsPyList(ObjectDist * I)
 
   result = PyList_New(4);
   PyList_SetItem(result, 0, ObjectAsPyList(I));
-  PyList_SetItem(result, 1, PyInt_FromLong(I->NDSet));
+  // for backwards compatibility
+  PyList_SetItem(result, 1, PyInt_FromLong(I->DSet.size()));
   PyList_SetItem(result, 2, ObjectDistDSetAsPyList(I));
   PyList_SetItem(result, 3, PyInt_FromLong(0));
 
@@ -214,10 +209,11 @@ int ObjectDistNewFromPyList(PyMOLGlobals * G, PyObject * list, ObjectDist ** res
     auto *val = PyList_GetItem(list, 0);
     ok = ObjectFromPyList(G, val, I);
   }
-  if(ok)
-    ok = PConvPyIntToInt(PyList_GetItem(list, 1), &I->NDSet);
-  if(ok)
-    ok = ObjectDistDSetFromPyList(I, PyList_GetItem(list, 2));
+  if(ok){
+    CPythonVal *val = CPythonVal_PyList_GetItem(G, list, 2);
+    ok = ObjectDistDSetFromPyList(I, val);
+    CPythonVal_Free(val);
+  }
 
   ObjectDistInvalidateRep(I, cRepAll);
   if(ok) {
@@ -233,7 +229,7 @@ int ObjectDistNewFromPyList(PyMOLGlobals * G, PyObject * list, ObjectDist ** res
 /*========================================================================*/
 int ObjectDist::getNFrame() const
 {
-  return NDSet;
+  return DSet.size();
 }
 
 
@@ -241,11 +237,10 @@ int ObjectDist::getNFrame() const
 void ObjectDist::update()
 {
   auto I = this;
-  int a;
   OrthoBusyPrime(I->G);
-  for(a = 0; a < I->NDSet; a++)
+  for(int a = 0; a < I->DSet.size(); a++)
     if(I->DSet[a]) {
-      OrthoBusySlow(I->G, a, I->NDSet);
+      OrthoBusySlow(I->G, a, I->DSet.size());
       /*           printf(" ObjectDist: updating state %d of \"%s\".\n" , a+1, I->Name); */
       I->DSet[a]->update(a);
     }
@@ -253,13 +248,13 @@ void ObjectDist::update()
 
 
 /*========================================================================*/
-void ObjectDistInvalidateRep(ObjectDist * I, int rep)
+void ObjectDistInvalidateRep(ObjectDist * I, cRep_t rep)
 {
   int a;
   PRINTFD(I->G, FB_ObjectDist)
     " ObjectDistInvalidateRep: entered.\n" ENDFD;
 
-  for(a = 0; a < I->NDSet; a++)
+  for(a = 0; a < I->DSet.size(); a++)
     if(I->DSet[a]) {
       I->DSet[a]->invalidateRep(rep, cRepInvAll);
     }
@@ -271,7 +266,7 @@ void ObjectDist::render(RenderInfo * info)
 {
   auto I = this;
   int state = info->state;
-  int pass = info->pass;
+  const RenderPass pass = info->pass;
   CRay *ray = info->ray;
   auto pick = info->pick;
   bool shouldRender = false;
@@ -279,7 +274,8 @@ void ObjectDist::render(RenderInfo * info)
   if(ray || pick) {
     shouldRender = true;
   } else {
-    shouldRender = pass != 0;  // distance measurements should render 
+    shouldRender = pass != RenderPass::Antialias;
+                               // distance measurements should render
                                // both in opaque and transparency loop,
                                // the rep decides based on transparency
                                // whether it renders in that loop.
@@ -289,9 +285,9 @@ void ObjectDist::render(RenderInfo * info)
 
   ObjectPrepareContext(I, info);
   
-  for(StateIterator iter(I->G, I->Setting, state, I->NDSet);
+  for(StateIterator iter(I->G, I->Setting.get(), state, I->DSet.size());
       iter.next();) {
-    DistSet * ds = I->DSet[iter.state];
+    DistSet * ds = I->DSet[iter.state].get();
     if(ds)
       ds->render(info);
   }
@@ -301,44 +297,60 @@ void ObjectDist::render(RenderInfo * info)
 static CSetting **ObjectDistGetSettingHandle(ObjectDist * I, int state)
 {
   if(state < 0) {
-    return (&I->Setting);
+    return (&I->Setting.get());
   } else {
     return (NULL);
   }
 }
 #endif
 
-void ObjectDist::invalidate(int rep, int level, int state){
+void ObjectDist::invalidate(cRep_t rep, cRepInv_t level, int state){
   auto I = this;
-  for(StateIterator iter(I->G, I->Setting, state, I->NDSet);
+  for(StateIterator iter(I->G, I->Setting.get(), state, I->DSet.size());
       iter.next();) {
-    DistSet * ds = I->DSet[iter.state];
+    DistSet * ds = I->DSet[iter.state].get();
     if(ds)
       ds->invalidateRep(rep, level);
   }
 }
 
 /*========================================================================*/
-ObjectDist::ObjectDist(PyMOLGlobals * G) : CObject(G)
+ObjectDist::ObjectDist(PyMOLGlobals * G) : pymol::CObject(G)
 {
   auto I = this;
   I->type = cObjectMeasurement;
-  I->DSet = VLACalloc(DistSet *, 10);  /* auto-zero */
+  I->DSet.reserve(10);  /* auto-zero */
   I->Color = ColorGetIndex(G, "dash");
 }
 
+ObjectDist::ObjectDist(const ObjectDist& other)
+ : pymol::CObject(other)
+ , DSet(other.DSet)
+{
+  for (auto& d : DSet) {
+    if (d) {
+      d->Obj = this;
+    }
+  }
+}
+
+ObjectDist& ObjectDist::operator=(const ObjectDist& other)
+{
+  pymol::CObject::operator=(other);
+  DSet = other.DSet;
+  for (auto& d : DSet) {
+    if (d) {
+      d->Obj = this;
+    }
+  }
+  return *this;
+}
 
 /*========================================================================*/
 static void ObjectDistReset(PyMOLGlobals * G, ObjectDist * I)
 {
 	/* This wipes out all the distance sets and clears the state */
-  int a;
-  for(a = 0; a < I->NDSet; a++)
-    if(I->DSet[a]) {
-      I->DSet[a]->fFree();
-      I->DSet[a] = NULL;
-    }
-  I->NDSet = 0;
+  I->DSet.clear();
 }
 
 
@@ -350,9 +362,9 @@ static bool checkFrozenState(PyMOLGlobals * G, int sele, int &state) {
   if (sele < 0)
     return false;
 
-  auto obj = (const CObject*) SelectorGetSingleObjectMolecule(G, sele);
+  auto obj = (const pymol::CObject*) SelectorGetSingleObjectMolecule(G, sele);
   if(!obj ||
-      !SettingGetIfDefined_i(G, obj->Setting, cSetting_state, &state))
+      !SettingGetIfDefined_i(G, obj->Setting.get(), cSetting_state, &state))
     return false;
 
   --state;
@@ -422,7 +434,7 @@ ObjectDist *ObjectDistNewFromSele(PyMOLGlobals * G, ObjectDist * oldObj,
 	" ObjectDistNewFromSele: obj1 is frozen = %d into state %d+1\n", frozen2, state2 
 	ENDFB(G);
 
-      VLACheck(I->DSet, DistSet *, a);
+      VecCheck(I->DSet, a);
       if(!frozen1)
 	state1 = (n_state1>1) ? a : 0;
       if(!frozen2)
@@ -430,15 +442,30 @@ ObjectDist *ObjectDistNewFromSele(PyMOLGlobals * G, ObjectDist * oldObj,
 
       /* this does the actual work of creating the distances for this state */
       /* I->DSet[a] = new DistSet(G, selections, states, etc) -- created this new DistSet */
-      I->DSet[a] = SelectorGetDistSet(G, I->DSet[a], sele1, state1, sele2, state2, mode, cutoff, &dist);
-
+      if (5 <= mode && mode <= 7) {
+#ifdef _PYMOL_INCENTIVE
+#else
+        PRINTFB(G, FB_ObjectDist, FB_Errors)
+          " ObjectDist-Error: modes 5-7 only available in Incentive PyMOL\n"
+          ENDFB(G);
+        I->DSet[a] = nullptr;
+#endif
+      } else if (mode == 9) { // 9: halogen-bond interaction
+        I->DSet[a].reset(pymol::FindHalogenBondInteractions(G,
+            I->DSet[a].release(), sele1, state1, sele2, state2, cutoff, &dist));
+      } else if (mode == 10) { // 10: salt-bridge interaction
+        I->DSet[a].reset(pymol::FindSaltBridgeInteractions(G,
+            I->DSet[a].release(), sele1, state1, sele2, state2, cutoff, &dist));
+      } else {
+        I->DSet[a].reset(SelectorGetDistSet(
+            G, I->DSet[a].release(), sele1, state1, sele2, state2, mode, cutoff, &dist));
+      }
 
       /* if the distances are valid, then tally the total and set the ObjectMolecule pointer as necessary */
       if(I->DSet[a]) {
         dist_sum += dist;	/* average distance over N states */
         dist_cnt++;
         I->DSet[a]->Obj = I;	/* point to the ObjectMolecule for this state's DistanceSet */
-        I->NDSet = a + 1;
       }
 
       if(state >= 0 || (frozen1 && frozen2))
@@ -488,11 +515,7 @@ ObjectDist *ObjectDistNewFromAngleSele(PyMOLGlobals * G, ObjectDist * oldObj,
 
   /* figure out the total number of states */
 
-  mn = n_state1;
-  if(n_state2 > mn)
-    mn = n_state2;
-  if(n_state3 > mn)
-    mn = n_state3;
+  mn = std::max({n_state1, n_state2, n_state3});
 
   /* updated state handling */
   frozen1 = checkFrozenState(G, sele1, state1);
@@ -525,15 +548,13 @@ ObjectDist *ObjectDistNewFromAngleSele(PyMOLGlobals * G, ObjectDist * oldObj,
       if(!frozen3)
 	state3 = (n_state3>1) ? a : 0;
 
-      VLACheck(I->DSet, DistSet *, a+1);
-      I->DSet[a] = SelectorGetAngleSet(G, I->DSet[a], sele1, state1, sele2,
+      VecCheck(I->DSet, a);
+      I->DSet[a].reset(SelectorGetAngleSet(G, I->DSet[a].release(), sele1, state1, sele2,
                                        state2, sele3, state3, mode, &angle_sum,
-                                       &angle_cnt);
+                                       &angle_cnt));
 
       if(I->DSet[a]) {
         I->DSet[a]->Obj = I;
-        if(I->NDSet <= a)
-          I->NDSet = a + 1;
       }
       if(state >= 0 || (frozen1 && frozen2 && frozen3))
         break;
@@ -541,7 +562,7 @@ ObjectDist *ObjectDistNewFromAngleSele(PyMOLGlobals * G, ObjectDist * oldObj,
   }
   /* else {
      VLAFreeP(I->DSet);
-     OOFreeP(I);
+     DeleteP(I);
      }
    */
   ObjectDistUpdateExtents(I);
@@ -620,15 +641,13 @@ ObjectDist *ObjectDistNewFromDihedralSele(PyMOLGlobals * G, ObjectDist * oldObj,
       if(!frozen4)
 	state4 = (n_state4>1) ? a : 0;
 
-      VLACheck(I->DSet, DistSet *, a);
-      I->DSet[a] = SelectorGetDihedralSet(G, I->DSet[a], sele1, state1, sele2,
+      VecCheck(I->DSet, a);
+      I->DSet[a].reset(SelectorGetDihedralSet(G, I->DSet[a].release(), sele1, state1, sele2,
                                           state2, sele3, state3, sele4, state4,
-                                          mode, &angle_sum, &angle_cnt);
+                                          mode, &angle_sum, &angle_cnt));
 
       if(I->DSet[a]) {
         I->DSet[a]->Obj = I;
-        if(I->NDSet <= a)
-          I->NDSet = a + 1;
       }
 
       if(state >= 0 || (frozen1 && frozen2 && frozen3 && frozen4))
@@ -637,7 +656,7 @@ ObjectDist *ObjectDistNewFromDihedralSele(PyMOLGlobals * G, ObjectDist * oldObj,
   }
   /* else {
      VLAFreeP(I->DSet);
-     OOFreeP(I);
+     DeleteP(I);
      }
    */
   ObjectDistUpdateExtents(I);
@@ -650,15 +669,7 @@ ObjectDist *ObjectDistNewFromDihedralSele(PyMOLGlobals * G, ObjectDist * oldObj,
   return (I);
 }
 
-
-/*========================================================================*/
-ObjectDist::~ObjectDist()
+pymol::CObject* ObjectDist::clone() const
 {
-  auto I = this;
-  for(int a = 0; a < I->NDSet; a++)
-    if(I->DSet[a]) {
-      I->DSet[a]->fFree();
-      I->DSet[a] = NULL;
-    }
-  VLAFreeP(I->DSet);
+  return new ObjectDist(*this);
 }

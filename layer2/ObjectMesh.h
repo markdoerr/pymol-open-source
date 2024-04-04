@@ -21,6 +21,7 @@ Z* -------------------------------------------------------------------
 #include "CGO.h"
 #include"Word.h"
 #include"Symmetry.h"
+#include"Result.h"
 
 struct ObjectMeshState : public CObjectState {
   ObjectNameType MapName{};
@@ -44,39 +45,40 @@ struct ObjectMeshState : public CObjectState {
   pymol::vla<float> AtomVertex;
   int CarveFlag = false;
   float CarveBuffer = 0.0f;
-  int MeshMode;
-  pymol::cache_ptr<CGO, CGODeleter> UnitCellCGO;
+  cIsomeshMode MeshMode;
+  pymol::cache_ptr<CGO> UnitCellCGO;
   WordType caption{};
   float AltLevel;
   pymol::copyable_ptr<Isofield> Field;
   /* not stored */
-  pymol::cache_ptr<CGO, CGODeleter> shaderCGO;
-  pymol::cache_ptr<CGO, CGODeleter> shaderUnitCellCGO;
+  pymol::cache_ptr<CGO> shaderCGO;
+  pymol::cache_ptr<CGO> shaderUnitCellCGO;
   ObjectMeshState(PyMOLGlobals* G);
 };
 
-struct ObjectMesh : public CObject {
-  pymol::vla<ObjectMeshState> State;
+struct ObjectMesh : public pymol::CObject {
+  std::vector<ObjectMeshState> State;
   int NState = 0;
   ObjectMesh(PyMOLGlobals* G);
 
   // virtual methods
   void update() override;
   void render(RenderInfo* info) override;
-  void invalidate(int rep, int level, int state) override;
+  void invalidate(cRep_t rep, cRepInv_t level, int state) override;
   int getNFrame() const override;
+  pymol::CObject* clone() const override;
 };
 
 ObjectMesh *ObjectMeshFromBox(PyMOLGlobals * G, ObjectMesh * obj, ObjectMap * map,
                               int map_state,
                               int state, float *mn, float *mx,
-                              float level, int meshMode,
+                              float level, cIsomeshMode,
                               float carve, float *vert_vla, float alt_level, int quiet);
 ObjectMesh *ObjectMeshFromXtalSym(PyMOLGlobals * G, ObjectMesh * obj, ObjectMap * map,
                                   CSymmetry * sym,
                                   int map_state,
                                   int state, float *mn, float *mx,
-                                  float level, int meshMode,
+                                  float level, cIsomeshMode,
                                   float carve, float *vert_vla,
                                   float alt_level, int quiet);
 void ObjectMeshDump(ObjectMesh * I, const char *fname, int state, int quiet);
@@ -84,7 +86,7 @@ void ObjectMeshDump(ObjectMesh * I, const char *fname, int state, int quiet);
 PyObject *ObjectMeshAsPyList(ObjectMesh * I);
 int ObjectMeshNewFromPyList(PyMOLGlobals * G, PyObject * list, ObjectMesh ** result);
 int ObjectMeshSetLevel(ObjectMesh * I, float level, int state, int quiet);
-int ObjectMeshGetLevel(ObjectMesh * I, int state, float *result);
+pymol::Result<float> ObjectMeshGetLevel(ObjectMesh * I, int state);
 int ObjectMeshInvalidateMapName(ObjectMesh * I, const char *name, const char * new_name);
 int ObjectMeshAllMapsInStatesExist(ObjectMesh * I);
 

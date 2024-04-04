@@ -11,9 +11,20 @@ Supported ways to launch PyMOL:
 
     shell> python /path/to/pymol/__init__.py [args]
 
+  If the 'pymol' module is in PYTHONPATH
+
+    shell> python -m pymol [args]
+
   From a python main thread:
 
+    >>> # blocks the interpreter
+    >>> import pymol
+    >>> pymol.launch()
+
+  From a python main thread, spawning a new thread:
+
     >>> # with GUI
+    >>> # THIS IS NOT SUPPORTED ON macOS
     >>> import pymol
     >>> pymol.finish_launching()
 
@@ -22,9 +33,6 @@ Supported ways to launch PyMOL:
     >>> pymol.finish_launching(['pymol', '-cq'])
 
 '''
-
-from __future__ import absolute_import
-from __future__ import print_function
 
 import os
 import sys
@@ -62,21 +70,13 @@ if __name__ == '__main__':
 
     # standard launch (consume main thread)
     import pymol
-    pymol.launch(args)
+    sys.exit(pymol.launch(args))
 
-    # this should never be reached because PyMOL will exit the process
-    raise SystemExit
-
-IS_PY2 = sys.version_info[0] == 2
-IS_PY3 = sys.version_info[0] == 3
 IS_WINDOWS = sys.platform.startswith('win')
 IS_MACOS = sys.platform.startswith('darwin')
 IS_LINUX = sys.platform.startswith('linux')
 
-if IS_PY3:
-    import _thread as thread
-else:
-    import thread
+import _thread as thread
 
 import copy
 import threading
@@ -86,6 +86,7 @@ import traceback
 import math
 
 from . import invocation
+from . import colorprinting
 
 def _init_internals(_pymol):
 
@@ -113,10 +114,9 @@ def _init_internals(_pymol):
     _pymol._ext_gui = None
 
     # lists of functions to call when saving and restoring pymol session objects
-    # The entry 'None' represents the PyMOL C-API function call
 
-    _pymol._session_save_tasks = [ None ]
-    _pymol._session_restore_tasks = [ None ]
+    _pymol._session_save_tasks = []
+    _pymol._session_restore_tasks = []
 
     # cached results (as a list):
     # [ [size, (hash1, hash2, ... ), (inp1, inp2, ...), output],
@@ -136,8 +136,6 @@ def _init_internals(_pymol):
 
     # stored scenes
 
-    _pymol._scene_dict_sc = None
-    _pymol._scene_counter = 1
     _pymol._scene_quit_on_action = ''
 
     # get us a private invocation pseudo-module
@@ -189,6 +187,9 @@ def guess_pymol_path():
 
         # /usr/share/pymol
         os.path.join(sys.prefix, 'share', 'pymol'),
+
+        # venv --system-site-packages (experimental)
+        os.path.join(sys.base_prefix, 'share', 'pymol'),
     ]
 
     for pymol_path in pymol_path_candidates:
@@ -208,20 +209,6 @@ def setup_environ():
     if 'PYMOL_SCRIPTS' not in os.environ:
         os.environ['PYMOL_SCRIPTS'] = os.path.join(os.environ['PYMOL_PATH'], 'scripts')
     os.environ['TUT'] = os.path.join(os.environ['PYMOL_DATA'], 'tut')
-
-    # auto-detect bundled FREEMOL (if present)
-    if 'FREEMOL' not in os.environ:
-        for test_path in ['ext', 'freemol']:
-            test_path = os.path.join(os.environ['PYMOL_PATH'], test_path)
-            if os.path.isdir(test_path):
-                os.environ['FREEMOL'] = test_path
-                break
-
-    # include FREEMOL's libpy in sys.path (if present)
-    if 'FREEMOL' in os.environ:
-        freemol_libpy = os.path.join(os.environ['FREEMOL'], "libpy")
-        if os.path.isdir(freemol_libpy) and freemol_libpy not in sys.path:
-            sys.path.append(freemol_libpy)
 
     # set Tcl/Tk environment if we ship it in ext/lib
     pymol_path = os.environ['PYMOL_PATH']
@@ -275,8 +262,9 @@ def exec_deferred(self):
                 else:
                     cmd.load(a, quiet=0)
     except CmdException as e:
-        print(e)
-        print(" Error: Argument processing aborted due to exception (above).")
+        colorprinting.error(str(e))
+        colorprinting.error(
+            " Error: Argument processing aborted due to exception (above).")
     except socket_error:
         # this (should) only happen if we're opening a PWG file on startup
         # and the port is busy.  For now, simply bail...
@@ -432,17 +420,19 @@ def launch(args=None, block_input_hook=0):
 
         try:
             from pmg_qt import pymol_qt_gui
-            sys.exit(pymol_qt_gui.execapp())
-        except ImportError:
-            print('Qt not available, using GLUT/Tk interface')
+            return pymol_qt_gui.execapp()
+        except ImportError as ex:
+            print(f'Qt not available ({ex}), using GLUT/Tk interface')
             invocation.options.gui = 'pmg_tk'
 
     prime_pymol()
-    _cmd.runpymol(_cmd._get_global_C_object(), block_input_hook)
+    _cmd.runpymol(None, block_input_hook)
 
 def finish_launching(args=None):
     '''
     Start the PyMOL process in a thread
+
+    THIS IS NOT SUPPORTED ON macOS
     '''
     global glutThreadObject
 
@@ -568,6 +558,8 @@ if 'DISPLAY' in os.environ:
 import pymol._cmd
 _cmd = sys.modules['pymol._cmd']
 
+get_capabilities = _cmd.get_capabilities
+
 from . import cmd
 
 cmd._COb = None
@@ -597,7 +589,7 @@ sys.meta_path.insert(0, _NoCmdFinder())
 
 ########## LEGACY PRINT STATEMENT FOR PYMOL COMMAND LINE ###################
 
-if IS_PY3:
+if True:
     def _print_statement(*args, **_):
         '''Legacy Python-2-like print statement for the PyMOL command line'''
         kw = {}

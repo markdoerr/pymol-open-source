@@ -24,7 +24,7 @@ Z* -------------------------------------------------------------------
 
 #include"GadgetSet.h"
 
-struct ObjectGadget : public CObject {
+struct ObjectGadget : public pymol::CObject {
   pymol::vla<GadgetSet*> GSet;
   int NGSet = 0;
   int CurGSet = 0;
@@ -37,6 +37,7 @@ struct ObjectGadget : public CObject {
   virtual void update() override;
   void render(RenderInfo* info) override;
   int getNFrame() const override;
+  pymol::RenderContext getRenderContext() const override;
 };
 
 #define cGadgetPlain 0
@@ -51,8 +52,8 @@ int ObjectGadgetInitFromPyList(PyMOLGlobals * G, PyObject * list, ObjectGadget *
                                int version);
 
 ObjectGadget *ObjectGadgetTest(PyMOLGlobals * G);
-int ObjectGadgetGetVertex(ObjectGadget * I, int index, int base, float *v);     /* in current state */
-int ObjectGadgetSetVertex(ObjectGadget * I, int index, int base, float *v);     /* in current state */
+int ObjectGadgetGetVertex(const ObjectGadget * I, int index, int base, float *v);     /* in current state */
+int ObjectGadgetSetVertex(ObjectGadget * I, int index, int base, const float *v);     /* in current state */
 void ObjectGadgetUpdateExtents(ObjectGadget * I);
 void ObjectGadgetUpdateStates(ObjectGadget * I);
 

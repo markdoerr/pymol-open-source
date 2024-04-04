@@ -12,15 +12,10 @@
 #-*
 #Z* -------------------------------------------------------------------
 
-from __future__ import print_function, absolute_import
-
 if True:
 
     import sys
-    if sys.version_info[0] == 2:
-        import thread
-        import urllib2
-    else:
+    if True:
         import _thread as thread
         import urllib.request as urllib2
         from io import FileIO as file
@@ -498,7 +493,7 @@ PYMOL API
                 _self.unlock(-1,_self=_self)
         return None
 
-    def delete(name,_self=cmd):
+    def delete(name, *, _self=cmd):
         '''
 DESCRIPTION
 
@@ -580,7 +575,7 @@ SEE ALSO
 
         # for aliasing compound commands to a single keyword
 
-    def extendaa(*arg, **kw):
+    def extendaa(*arg, _self=cmd):
         '''
 DESCRIPTION
 
@@ -593,7 +588,6 @@ EXAMPLE
     def zoom_organic(selection='*'):
         cmd.zoom('organic & (%s)' % selection)
         '''
-        _self = kw.get('_self', cmd)
         auto_arg = _self.auto_arg
         def wrapper(func):
             name = func.__name__
@@ -644,15 +638,13 @@ SEE ALSO
 
     async_threads = []
 
-    def async_(func, *args, **kwargs):
+    def async_(func, *args, _self=cmd, **kwargs):
         '''
 DESCRIPTION
 
     Run function threaded and show "please wait..." message.
         '''
         from .wizard.message import Message
-
-        _self = kwargs.pop('_self', cmd)
 
         wiz = Message(['please wait ...'], dismiss=0, _self=_self)
 

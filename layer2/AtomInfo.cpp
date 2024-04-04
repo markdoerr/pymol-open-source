@@ -32,8 +32,6 @@ Z* -------------------------------------------------------------------
 #include"Color.h"
 #include"PConv.h"
 #include"Ortho.h"
-#include"OVOneToAny.h"
-#include"OVContext.h"
 #include"PyMOLObject.h"
 #include"Setting.h"
 #include"Executive.h"
@@ -41,16 +39,17 @@ Z* -------------------------------------------------------------------
 #include "pymol/zstring_view.h"
 
 #include <map>
+#include <unordered_set>
 
-struct _CAtomInfo {
-  int NColor, CColor, DColor, HColor, OColor, SColor;
-  int BrColor, ClColor, FColor, IColor;
-  int PColor, MgColor, MnColor, NaColor, KColor, CaColor;
-  int CuColor, FeColor, ZnColor;
-  int SeColor;
-  int DefaultColor;
-  int NextUniqueID;
-  OVOneToAny *ActiveIDs;
+struct CAtomInfo {
+  int NColor{}, CColor{}, DColor{}, HColor{}, OColor{}, SColor{};
+  int BrColor{}, ClColor{}, FColor{}, IColor{};
+  int PColor{}, MgColor{}, MnColor{}, NaColor{}, KColor{}, CaColor{};
+  int CuColor{}, FeColor{}, ZnColor{};
+  int SeColor{};
+  int DefaultColor{};
+  int NextUniqueID = 1;
+  std::unordered_set<int> ActiveIDs;
 };
 
 void AtomInfoCleanAtomName(char *name)
@@ -93,50 +92,27 @@ PyObject *SettingGetIfDefinedPyObject(PyMOLGlobals * G, AtomInfoType * ai, int s
   return NULL;
 }
 
-static int AtomInfoPrimeUniqueIDs(PyMOLGlobals * G)
+int AtomInfoReserveUniqueID(PyMOLGlobals* G, int unique_id)
 {
-  CAtomInfo *I = G->AtomInfo;
-  if(!I->ActiveIDs) {
-    OVContext *C = G->Context;
-    I->ActiveIDs = OVOneToAny_New(C->heap);
-  }
-  return (I->ActiveIDs != NULL);
-}
-
-int AtomInfoReserveUniqueID(PyMOLGlobals * G, int unique_id)
-{
-  CAtomInfo *I = G->AtomInfo;
-  if(!I->ActiveIDs)
-    AtomInfoPrimeUniqueIDs(G);
-  if(I->ActiveIDs)
-    return (OVreturn_IS_OK(OVOneToAny_SetKey(I->ActiveIDs, unique_id, 1)));
+  G->AtomInfo->ActiveIDs.insert(unique_id);
   return 0;
 }
 
-int AtomInfoIsUniqueIDActive(PyMOLGlobals * G, int unique_id)
+int AtomInfoIsUniqueIDActive(PyMOLGlobals* G, int unique_id)
 {
-  CAtomInfo *I = G->AtomInfo;
-  if(!I->ActiveIDs)
-    return 0;
-  else
-    return (OVreturn_IS_OK(OVOneToAny_GetKey(I->ActiveIDs, unique_id)));
-  return 0;
+  return G->AtomInfo->ActiveIDs.find(unique_id) != G->AtomInfo->ActiveIDs.end();
 }
 
 int AtomInfoGetNewUniqueID(PyMOLGlobals * G)
 {
   CAtomInfo *I = G->AtomInfo;
   int result = 0;
-  AtomInfoPrimeUniqueIDs(G);
-  if(I->ActiveIDs) {
-    while(1) {
-      result = I->NextUniqueID++;
-      if(result) {              /* skip zero */
-        if(OVOneToAny_GetKey(I->ActiveIDs, result).status == OVstatus_NOT_FOUND) {
-          if(OVreturn_IS_ERROR(OVOneToAny_SetKey(I->ActiveIDs, result, 1)))
-            result = 0;
-          break;
-        }
+  while (true) {
+    result = I->NextUniqueID++;
+    if(result) {              /* skip zero */
+      if (I->ActiveIDs.find(result) == I->ActiveIDs.end()) {
+        I->ActiveIDs.insert(result);
+        break;
       }
     }
   }
@@ -159,11 +135,9 @@ int AtomInfoCheckUniqueBondID(PyMOLGlobals * G, BondType * bi)
 }
 
 void BondTypeInit(BondType *bt){
-#ifdef _PYMOL_IP_EXTRAS
-  bt->oldid = -1;
-#endif
   bt->unique_id = 0;
   bt->has_setting = 0;
+  bt->symop_2 = pymol::SymOp();
 }
 
 /**
@@ -175,26 +149,18 @@ void BondTypeInit2(BondType *bond, int i1, int i2, int order)
   bond->index[0] = i1;
   bond->index[1] = i2;
   bond->order = order;
-  bond->id = -1;
-  bond->stereo = 0;
 }
 
 int AtomInfoInit(PyMOLGlobals * G)
 {
-  CAtomInfo *I = NULL;
-  if((I = (G->AtomInfo = pymol::calloc<CAtomInfo>(1)))) {
-    AtomInfoPrimeColors(G);
-    I->NextUniqueID = 1;
-    return 1;
-  } else
-    return 0;
+  G->AtomInfo = new CAtomInfo();
+  AtomInfoPrimeColors(G);
+  return 1;
 }
 
 void AtomInfoFree(PyMOLGlobals * G)
 {
-  CAtomInfo *I = G->AtomInfo;
-  OVOneToAny_DEL_AUTO_NULL(I->ActiveIDs);
-  FreeP(G->AtomInfo);
+  DeleteP(G->AtomInfo);
 }
 
 
@@ -1076,8 +1042,8 @@ void AtomInfoPurgeBond(PyMOLGlobals * G, BondType * bi)
   if(bi->has_setting && bi->unique_id) {
     SettingUniqueDetachChain(G, bi->unique_id);
   }
-  if(bi->unique_id && I->ActiveIDs) {
-    OVOneToAny_DelKey(I->ActiveIDs, bi->unique_id);
+  if (bi->unique_id) {
+    I->ActiveIDs.erase(bi->unique_id);
     bi->unique_id = 0;
   }
 }
@@ -1099,8 +1065,7 @@ void AtomInfoPurge(PyMOLGlobals * G, AtomInfoType * ai)
   if(ai->unique_id) {
     ExecutiveUniqueIDAtomDictInvalidate(G);
 
-    if (I->ActiveIDs)
-      OVOneToAny_DelKey(I->ActiveIDs, ai->unique_id);
+    I->ActiveIDs.erase(ai->unique_id);
   }
 #ifdef _PYMOL_IP_EXTRAS
 #endif
@@ -1982,55 +1947,6 @@ static int AtomInfoNameCompare(PyMOLGlobals * G, const lexidx_t& name1, const le
   return AtomInfoNameCompare(G, LexStr(G, name1), LexStr(G, name2));
 }
 
-int AtomInfoCompareAll(PyMOLGlobals * G, const AtomInfoType * at1, const AtomInfoType * at2)
-{
-  return (at1->resv != at2->resv ||
-	  at1->customType != at2->customType ||
-	  at1->priority != at2->priority ||
-	  at1->b != at2->b ||
-	  at1->q != at2->q ||
-	  at1->vdw != at2->vdw ||
-	  at1->partialCharge != at2->partialCharge ||
-	  at1->formalCharge != at2->formalCharge ||
-	  //	  at1->selEntry != at2->selEntry ||
-	  at1->color != at2->color ||
-	  at1->id != at2->id ||
-	  at1->flags != at2->flags ||
-	  //	  at1->temp1 != at2->temp1 ||
-	  at1->unique_id != at2->unique_id ||
-	  at1->discrete_state != at2->discrete_state ||
-	  at1->elec_radius != at2->elec_radius ||
-	  at1->rank != at2->rank ||
-	  at1->textType != at2->textType ||
-	  at1->custom != at2->custom ||
-	  at1->label != at2->label ||
-	  //	  !memcmp(at1->visRep, at2->visRep, sizeof(signed char)*cRepCnt) || // should this be in here?
-	  at1->stereo != at2->stereo ||
-	  at1->cartoon != at2->cartoon ||
-	  at1->hetatm != at2->hetatm ||
-	  at1->bonded != at2->bonded ||
-	  //	  at1->chemFlag != at2->chemFlag ||
-	  //	  at1->geom != at2->geom ||
-	  //	  at1->valence != at2->valence ||  // Valence should not be in, since it is not initially computed?
-	  at1->deleteFlag != at2->deleteFlag ||
-	  at1->masked != at2->masked ||
-	  at1->protekted != at2->protekted ||
-	  at1->protons != at2->protons ||
-	  at1->hb_donor != at2->hb_donor ||
-	  at1->hb_acceptor != at2->hb_acceptor ||
-	  at1->has_setting != at2->has_setting ||
-	  at1->chain != at2->chain ||
-	  at1->segi != at2->segi ||
-	  at1->resn != at2->resn ||
-	  at1->name != at2->name ||
-	  strcmp(at1->alt, at2->alt) || 
-	  at1->inscode != at2->inscode ||
-	  strcmp(at1->elem, at2->elem) || 
-	  strcmp(at1->ssType, at2->ssType));
-	  // should these variables be in here?
-	  //  float U11, U22, U33, U12, U13, U23;
-}
-
 /**
  * Compares atoms based on all atom identifiers, discrete state, priority,
  * hetatm (optional) and rank (optional)
@@ -2499,8 +2415,14 @@ void AtomInfoAssignParameters(PyMOLGlobals * G, AtomInfoType * I)
     case 'Q':
       *(e + 1) = 0;
       break;
+    case 'p':
+      if (p_strstartswith(n, "pseudo")) {
+        strcpy(e, "PS");
+      }
     }
-    if(*(e + 1) && (e[1] != 'P' || e[0] != 'L'))
+    if(*(e + 1) &&
+        (/* e != "LP" */ e[1] != 'P' || e[0] != 'L') &&
+        (/* e != "PS" */ e[1] != 'S' || e[0] != 'P'))
       *(e + 1) = tolower(*(e + 1));
   }
 
@@ -2818,16 +2740,6 @@ void AtomInfoAssignParameters(PyMOLGlobals * G, AtomInfoType * I)
   }
 }
 
-int BondTypeCompare(PyMOLGlobals * G, const BondType * bt1, const BondType * bt2){
-  return (bt1->index[0] != bt2->index[0] ||
-	  bt1->index[1] != bt2->index[1] ||
-	  bt1->order != bt2->order ||
-	  bt1->id != bt2->id ||
-	  bt1->unique_id != bt2->unique_id ||
-	  bt1->stereo != bt2->stereo ||
-	  bt1->has_setting != bt2->has_setting);
-}
-
 /**
  * Get the element symbol. E.g. "He" for Helium.
  * @param[out] dst output buffer of length cElemNameLen
@@ -3004,4 +2916,9 @@ void AtomInfoGetAlignedPDBAtomName(PyMOLGlobals * G,
   }
 
   name[4] = 0;
+}
+
+bool BondType::hasSymOp() const
+{
+  return symop_2;
 }

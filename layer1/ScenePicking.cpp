@@ -10,22 +10,29 @@
 #include"P.h"
 #include "Err.h"
 #include "Picking.h"
+#include "Feedback.h"
 
 #define cRange 7
 
-int SceneDoXYPick(PyMOLGlobals * G, int x, int y, int click_side)
+int SceneDoXYPick(PyMOLGlobals * G, int x, int y, ClickSide click_side)
 {
   CScene *I = G->Scene;
-  int defer_builds_mode = SettingGetGlobal_i(G, cSetting_defer_builds_mode);
+  int defer_builds_mode = SettingGet<int>(G, cSetting_defer_builds_mode);
 
   if(defer_builds_mode == 5)    /* force generation of a pickable version */
     SceneUpdate(G, true);
-  if(OrthoGetOverlayStatus(G) || SettingGetGlobal_i(G, cSetting_text))
-    SceneRender(G, NULL, 0, 0, NULL, 0, 0, 0, 0);       /* remove overlay if present */
+  if (OrthoGetOverlayStatus(G) || SettingGet<int>(G, cSetting_text)) {
+    SceneRenderInfo renderInfo{};
+    SceneRender(G, renderInfo);       /* remove overlay if present */
+  }
   SceneDontCopyNext(G);
 
   I->LastPicked.context.object = NULL;
-  SceneRender(G, &I->LastPicked, x, y, NULL, 0, 0, click_side, 0);
+  SceneRenderInfo renderInfo{};
+  renderInfo.pick = &I->LastPicked;
+  renderInfo.mousePos = Offset2D{x, y};
+  renderInfo.clickSide = click_side;
+  SceneRender(G, renderInfo);
   return (I->LastPicked.context.object != NULL);
   /* did we pick something? */
 }
@@ -38,9 +45,16 @@ static void PickColorConverterSetRgbaBitsFromGL(
     PyMOLGlobals* G, PickColorConverter& pickconv)
 {
   GLint rgba_bits[4] = {4, 4, 4, 0};
+  int max_check_bits = 0;
+
+#ifdef _WEBGL
+  // Can't turn off antialiasing in WebPyMOL, so we need to add some check bits
+  // to filter out antialiased pixels.
+  max_check_bits = 2;
+#endif
 
   if (!SettingGet<bool>(G, cSetting_pick32bit)) {
-    pickconv.setRgbaBits(rgba_bits);
+    pickconv.setRgbaBits(rgba_bits, max_check_bits);
     return;
   }
 
@@ -51,7 +65,7 @@ static void PickColorConverterSetRgbaBitsFromGL(
   }
 
   if (currentFrameBuffer != G->ShaderMgr->default_framebuffer_id) {
-    glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, G->ShaderMgr->default_framebuffer_id);
+    glBindFramebuffer(GL_FRAMEBUFFER, G->ShaderMgr->default_framebuffer_id);
   }
 
   glGetIntegerv(GL_RED_BITS, rgba_bits + 0);
@@ -64,10 +78,10 @@ static void PickColorConverterSetRgbaBitsFromGL(
       rgba_bits[2], rgba_bits[3] ENDFD;
 
   if (currentFrameBuffer != G->ShaderMgr->default_framebuffer_id) {
-    glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, currentFrameBuffer);
+    glBindFramebuffer(GL_FRAMEBUFFER, currentFrameBuffer);
   }
 
-  pickconv.setRgbaBits(rgba_bits);
+  pickconv.setRgbaBits(rgba_bits, max_check_bits);
 }
 
 /**
@@ -91,8 +105,9 @@ static std::vector<unsigned> SceneGetPickIndices(PyMOLGlobals* G,
 
   std::vector<unsigned> indices(w * h);
 
-  if(I->grid.active)
-    GridGetGLViewport(G, &I->grid);
+  if (I->grid.active) {
+    I->grid.cur_view = SceneGetViewport(G);
+  }
 
   for (int pass = 0;; ++pass) {
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -106,10 +121,10 @@ static std::vector<unsigned> SceneGetPickIndices(PyMOLGlobals* G,
       int slot;
       for(slot = 0; slot <= I->grid.last_slot; slot++) {
         if(I->grid.active) {
-          GridSetGLViewport(&I->grid, slot);
+          GridSetViewport(G, &I->grid, slot);
         }
         SceneRenderAll(
-            G, context, NULL, &pickmgr, 0, true, 0.0F, &I->grid, 0, 0);
+            G, context, NULL, &pickmgr, RenderPass::Antialias, true, 0.0F, &I->grid, 0, SceneRenderWhich::AllObjects);
       }
     }
 
@@ -152,7 +167,7 @@ static std::vector<unsigned> SceneGetPickIndices(PyMOLGlobals* G,
   }
 
   if(I->grid.active)
-    GridSetGLViewport(&I->grid, -1);
+    GridSetViewport(G, &I->grid, -1);
 
   pickmgr.m_valid = true;
 
@@ -258,9 +273,10 @@ void SceneRenderPickingMultiPick(PyMOLGlobals * G, SceneUnitContext *context, Mu
 #endif
 }
 
-void SceneRenderPicking(PyMOLGlobals * G, int stereo_mode, int *click_side, int stereo_double_pump_mono, 
-			Picking * pick, int x, int y, Multipick * smp, SceneUnitContext *context,
-			GLenum render_buffer){
+void SceneRenderPicking(PyMOLGlobals* G, int stereo_mode, ClickSide click_side,
+    int stereo_double_pump_mono, Picking* pick, int x, int y, Multipick* smp,
+    SceneUnitContext* context, GLenum render_buffer)
+{
   CScene *I = G->Scene;
 
   if (render_buffer == GL_BACK) {
@@ -274,10 +290,10 @@ void SceneRenderPicking(PyMOLGlobals * G, int stereo_mode, int *click_side, int 
     case cStereo_crosseye:
     case cStereo_walleye:
     case cStereo_sidebyside:
-      glViewport(I->rect.left, I->rect.bottom, I->Width / 2, I->Height);
+      SceneSetViewport(G, I->rect.left, I->rect.bottom, I->Width / 2, I->Height);
       break;
     case cStereo_geowall:
-      *click_side = OrthoGetWrapClickSide(G);
+      click_side = OrthoGetWrapClickSide(G);
       break;
     }
   }
@@ -287,12 +303,12 @@ void SceneRenderPicking(PyMOLGlobals * G, int stereo_mode, int *click_side, int 
 
   switch (stereo_mode) {
   case cStereo_crosseye:
-    ScenePrepareMatrix(G, (*click_side > 0) ? 1 : 2);
+    ScenePrepareMatrix(G, click_side == ClickSide::Right ? 1 : 2);
     break;
   case cStereo_walleye:
   case cStereo_geowall:
   case cStereo_sidebyside:
-    ScenePrepareMatrix(G, (*click_side < 0) ? 1 : 2);
+    ScenePrepareMatrix(G, click_side == ClickSide::Left ? 1 : 2);
     break;
 #ifdef _PYMOL_OPENVR
   case cStereo_openvr:
@@ -316,23 +332,29 @@ void SceneRenderPicking(PyMOLGlobals * G, int stereo_mode, int *click_side, int 
 int SceneMultipick(PyMOLGlobals * G, Multipick * smp)
 {
   CScene *I = G->Scene;
-  int click_side = 0;
-  int defer_builds_mode = SettingGetGlobal_i(G, cSetting_defer_builds_mode);
+  int defer_builds_mode = SettingGet<int>(G, cSetting_defer_builds_mode);
 
   if(defer_builds_mode == 5)    /* force generation of a pickable version */
     SceneUpdate(G, true);
 
-  if(OrthoGetOverlayStatus(G) || SettingGetGlobal_i(G, cSetting_text))
-    SceneRender(G, NULL, 0, 0, NULL, 0, 0, 0, 0);       /* remove overlay if present */
+  if (OrthoGetOverlayStatus(G) || SettingGet<int>(G, cSetting_text)) {
+    SceneRenderInfo renderInfo{};
+    SceneRender(G, renderInfo);       /* remove overlay if present */
+  }
   SceneDontCopyNext(G);
-  if(StereoIsAdjacent(G)) {
+
+  auto click_side = ClickSide::None;
+  if (StereoIsAdjacent(G)) {
     if(smp->x > (I->Width / 2))
-      click_side = 1;
+      click_side = ClickSide::Right;
     else
-      click_side = -1;
+      click_side = ClickSide::Left;
     smp->x = smp->x % (I->Width / 2);
   }
-  SceneRender(G, NULL, 0, 0, smp, 0, 0, click_side, 0);
+  SceneRenderInfo renderInfo{};
+  renderInfo.sceneMultipick = smp;
+  renderInfo.clickSide = click_side;
+  SceneRender(G, renderInfo);
   SceneDirty(G);
   return (1);
 }

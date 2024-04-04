@@ -18,9 +18,14 @@ Z* -------------------------------------------------------------------
 #ifndef _H_IOManager
 #define _H_IOManager
 
-#include "PyMOLGlobals.h"
-#include "ObjectMolecule.h"
-#include "ObjectMap.h"
+struct PyMOLGlobals;
+struct ObjectMolecule;
+struct ObjectMap;
+
+namespace pymol
+{
+struct CObject;
+}
 
 enum {
   cPlugIOManager_mol = 1,
@@ -42,12 +47,12 @@ int PlugIOManagerLoadTraj(PyMOLGlobals * G, ObjectMolecule * obj,
                           const char *fname, int frame,
                           int interval, int average, int start,
                           int stop, int max, const char *sele, int image,
-                          float *shift, int quiet, const char *plugin_type);
+                          const float *shift, int quiet, const char *plugin_type);
 ObjectMap *PlugIOManagerLoadVol(PyMOLGlobals * G, ObjectMap * obj,
     const char *fname, int state, int quiet, const char *plugin_type);
 ObjectMolecule *PlugIOManagerLoadMol(PyMOLGlobals * G, ObjectMolecule *origObj,
     const char *fname, int state, int quiet, const char *plugin_type);
-CObject * PlugIOManagerLoad(PyMOLGlobals * G, CObject ** obj_ptr,
+pymol::CObject* PlugIOManagerLoad(PyMOLGlobals* G, pymol::CObject** obj_ptr,
     const char *fname, int state, int quiet, const char *plugin_type,
     int mask=0);
 

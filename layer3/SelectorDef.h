@@ -9,11 +9,11 @@
 #include "os_std.h"
 #include "pymol/memory.h"
 
-#include "Selector.h"
-#include "ObjectMolecule.h"
+#include "AtomIterators.h"
+#include <string>
+#include <unordered_map>
 
-#include "OVLexicon.h"
-#include "OVOneToAny.h"
+#include <vector>
 
 #define cNDummyModels 2
 #define cNDummyAtoms 2
@@ -26,25 +26,36 @@ struct TableRec {
 };
 
 struct SelectionInfoRec {
-  int ID = 0;
-  bool justOneObjectFlag = false;
+  SelectorID_t ID = 0;
+  std::string name;
+
   ObjectMolecule* theOneObject = nullptr;
-  bool justOneAtomFlag = false;
-  int theOneAtom = 0;
+  int theOneAtom = -1;
+
+  bool justOneObject() const { return theOneObject != nullptr; }
+  bool justOneAtom() const { return justOneObject() && theOneAtom >= 0; }
+
   SelectionInfoRec() = default;
-  SelectionInfoRec(int id) : ID(id) {}
+  SelectionInfoRec(SelectorID_t id, std::string name_)
+      : ID(id)
+      , name(std::move(name_))
+  {
+  }
 };
 
+
+struct MemberType {
+  SelectorID_t selection;
+  int tag;                      /* must not be zero since it is also used as a boolean test for membership */
+  SelectorMemberOffset_t next;
+};
 
 struct CSelectorManager
 {
   std::vector<MemberType> Member;
-  int NMember = 0;
-  int FreeMember = 0;
-  std::vector<std::string> Name;
+  SelectorMemberOffset_t FreeMember = 0;
   std::vector<SelectionInfoRec> Info;
-  static int TmpCounter;
-  int NSelection = 0;
+  SelectorID_t NSelection = 0;
   std::unordered_map<std::string, int> Key;
   CSelectorManager();
 };
@@ -54,16 +65,40 @@ struct CSelector {
   CSelectorManager* mgr = nullptr;
   std::vector<ObjectMolecule*> Obj;
   std::vector<TableRec> Table;
-  std::vector<float> Vertex;
-  std::vector<int> Flag1;
-  std::vector<int> Flag2;
-  pymol::copyable_ptr<ObjectMolecule> Origin;
-  pymol::copyable_ptr<ObjectMolecule> Center;
+  pymol::cache_ptr<ObjectMolecule> Origin;
+  pymol::cache_ptr<ObjectMolecule> Center;
   int NCSet = 0; // Seems to hold the largest NCSet in Obj
   bool SeleBaseOffsetsValid = false;
   CSelector(PyMOLGlobals* G, CSelectorManager* mgr);
+  CSelector(const CSelector&) = default;
+  CSelector& operator=(const CSelector&) = default;
   CSelector(CSelector&&) = default;
   CSelector& operator=(CSelector&&) = default;
   ~CSelector();
 };
 
+/**
+ * Iterator over the selector table. If `SelectorUpdateTable(G,
+ * cSelectorUpdateTableAllStates, -1)` was called, this would be all atoms.
+ *
+ * Does NOT provide coord or coordset access
+ *
+ * @pre Selector table is up-to-date
+ */
+class SelectorAtomIterator : public AbstractAtomIterator
+{
+  CSelector* selector;
+
+public:
+  int a; //!< index in selector table
+
+  SelectorAtomIterator(CSelector* I)
+      : selector(I)
+  {
+    reset();
+  }
+
+  void reset() override { a = cNDummyAtoms - 1; }
+
+  bool next() override;
+};

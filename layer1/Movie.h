@@ -71,7 +71,7 @@ struct CMovie : public Block {
   ScrollBar m_ScrollBar;
   int DragMode {};
   int Dragging {};
-  CObject *DragObj {}; /* if not dragging all */
+  pymol::CObject* DragObj{}; /* if not dragging all */
   BlockRect DragRect {};
   int DragX {}, DragY {}, DragMenu {};
   int DragStartFrame {}, DragCurFrame {}, DragNearest {}, DragDraw {};
@@ -93,13 +93,13 @@ struct CMovie : public Block {
 int MovieFromPyList(PyMOLGlobals * G, PyObject * list, int *warning);
 PyObject *MovieAsPyList(PyMOLGlobals * G);
 int MovieGetSpecLevel(PyMOLGlobals *G,int frame);
-void MovieDrawViewElem(PyMOLGlobals *G, BlockRect *rect,int frames ORTHOCGOARG);
+void MovieDrawViewElem(PyMOLGlobals *G, BlockRect *rect,int frames , CGO *orthoCGO);
 
 Block *MovieGetBlock(PyMOLGlobals * G);
 void MovieFree(PyMOLGlobals * G);
 void MovieReset(PyMOLGlobals * G);
 void MovieDump(PyMOLGlobals * G);
-void MovieAppendSequence(PyMOLGlobals * G, const char *seq, int start_from,int freeze);
+void MovieAppendSequence(PyMOLGlobals* G, const char* seq, int start_from, bool freeze);
 int MovieSeekScene(PyMOLGlobals * G, int loop);
 int MoviePNG(PyMOLGlobals * G, const char* prefix, int save, int start, int stop,
              int missing_only, int modal, int format, int mode, int quiet,
@@ -156,10 +156,19 @@ int MovieViewModify(PyMOLGlobals *G,int action, int index, int count, int target
 void MovieViewReinterpolate(PyMOLGlobals *G);
 void MovieViewTrim(PyMOLGlobals *G,int n_frame);
 
-void MoviePrepareDrag(PyMOLGlobals *G, BlockRect * rect, CObject * obj, int mode, int x, int y, int nearest);
+void MoviePrepareDrag(PyMOLGlobals* G, BlockRect* rect, pymol::CObject* obj,
+    int mode, int x, int y, int nearest);
 int MovieXtoFrame(PyMOLGlobals *G, BlockRect *rect, int frames, int x, int nearest);
 
 /*void MovieSave(char *fname);
   void MovieLoad(char *fname);*/
 
+/**
+ * Sets the relationship between molecular states and movie frames
+ * @param specification state sequence
+ * @param start_from starting frame
+ * @param freeze flag to determine interpolation
+ */
+void MovieSet(PyMOLGlobals* G, pymol::zstring_view specification,
+    int start_from, bool freeze);
 #endif

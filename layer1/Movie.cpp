@@ -21,7 +21,6 @@ Z* -------------------------------------------------------------------
 #include"os_gl.h"
 
 #include"Base.h"
-#include"OOMac.h"
 #include"MemoryDebug.h"
 #include"Executive.h"
 #include"Ortho.h"
@@ -42,6 +41,7 @@ Z* -------------------------------------------------------------------
 #include"Seq.h"
 #include"CGO.h"
 #include"MovieScene.h"
+#include"Feedback.h"
 
 #define cMovieDragModeMoveKey   1
 #define cMovieDragModeInsDel    2
@@ -93,21 +93,26 @@ int MovieViewModify(PyMOLGlobals *G,int action, int index, int count,int target,
   MovieClearImages(G);
   if( (ok = ViewElemModify(G,&I->ViewElem, action, index, count, target)) ) {
     switch(action) {
-    case cViewElemModifyInsert: 
-      I->Sequence.insert(index, count);
-      I->Cmd.insert(I->Cmd.begin() + index, count, "");
-      I->NFrame = VLAGetSize(I->Sequence);
-      {
-        int frame = SceneGetFrame(G);
-        if(frame >= index) {
-          SceneSetFrame(G,0,frame + count);
+    case cViewElemModifyInsert:
+      if (index >= 0 && index < I->NFrame) {
+        I->Sequence.insert(index, count);
+        I->Cmd.insert(I->Cmd.begin() + index, count, "");
+        I->NFrame = VLAGetSize(I->Sequence);
+        {
+          int frame = SceneGetFrame(G);
+          if (frame >= index) {
+            SceneSetFrame(G, 0, frame + count);
+          }
         }
       }
       break;
     case cViewElemModifyDelete:
-      I->Sequence.erase(index, count);
-      I->Cmd.erase(I->Cmd.begin() + index, I->Cmd.begin() + index + count);
-      I->NFrame = VLAGetSize(I->Sequence);
+      if (index >= 0 && index < I->NFrame) {
+        I->Sequence.erase(index, count);
+        int end_pos = std::min(index + count, static_cast<int>(I->Cmd.size()));
+        I->Cmd.erase(I->Cmd.begin() + index, I->Cmd.begin() + end_pos);
+        I->NFrame = VLAGetSize(I->Sequence);
+      }
       break;
     case cViewElemModifyMove:
       if((index>=0) && (target>=0) && (index<I->NFrame) && (target<I->NFrame)) {
@@ -850,7 +855,7 @@ int MoviePNG(PyMOLGlobals * G, const char* prefix, int save, int start,
     SettingSetGlobal_b(G, cSetting_seq_view, 0);
     // force viewport update
     SeqChanged(G);
-    OrthoDoDraw(G, 0);
+    OrthoDoDraw(G, OrthoRenderMode::Main);
   }
 
   M->modal = modal;
@@ -867,7 +872,20 @@ int MoviePNG(PyMOLGlobals * G, const char* prefix, int save, int start,
 
 
 /*========================================================================*/
-void MovieAppendSequence(PyMOLGlobals * G, const char *str, int start_from,int freeze)
+void MovieSet(PyMOLGlobals* G, pymol::zstring_view specification,
+    int start_from, bool freeze)
+{
+  MovieAppendSequence(G, specification.c_str(), start_from, freeze);
+  SceneCountFrames(G);
+
+  // fix for PYMOL-1465
+  // force GUI update for movie panel
+  if(G->HaveGUI)
+  OrthoReshape(G, -1, -1, false);
+}
+
+/*========================================================================*/
+void MovieAppendSequence(PyMOLGlobals* G, const char* str, int start_from, bool freeze)
 {
   CMovie *I = G->Movie;
   int c = 0;
@@ -1448,7 +1466,7 @@ Block *MovieGetBlock(PyMOLGlobals * G)
 
 
 void MoviePrepareDrag(PyMOLGlobals *G, BlockRect * rect, 
-                      CObject * obj, int mode, int x, int y, int nearest)
+                      pymol::CObject * obj, int mode, int x, int y, int nearest)
 {
   CMovie *I = G->Movie;
   I->DragMode = mode;
@@ -1707,11 +1725,11 @@ int MovieGetPanelHeight(PyMOLGlobals * G)
   }
 }
 
-void MovieDrawViewElem(PyMOLGlobals *G, BlockRect *rect,int frames ORTHOCGOARG)
+void MovieDrawViewElem(PyMOLGlobals *G, BlockRect *rect,int frames , CGO *orthoCGO)
 {
   CMovie *I = G->Movie;
   if(I->ViewElem) {
-    ViewElemDraw(G,I->ViewElem,rect,frames,"camera" ORTHOCGOARGVAR);
+    ViewElemDraw(G,I->ViewElem,rect,frames,"camera", orthoCGO);
   }
 }
 
@@ -1771,7 +1789,7 @@ void CMovie::draw(CGO* orthoCGO)
                              tmpRect.bottom, tmpRect.right);
       {
 	I->m_ScrollBar.draw(orthoCGO);
-	ExecutiveMotionDraw(G,&tmpRect,count ORTHOCGOARGVAR);
+	ExecutiveMotionDraw(G,&tmpRect,count, orthoCGO);
 	I->m_ScrollBar.drawHandle(0.35F, orthoCGO);
       }
 
@@ -1786,9 +1804,9 @@ void CMovie::draw(CGO* orthoCGO)
           {
             float grey[4] = {0.75F,0.75F,0.75f,0.5};
             if(I->DragStartFrame<n_frame) 
-              ViewElemDrawBox(G,&I->DragRect, I->DragStartFrame, I->DragStartFrame+1, n_frame, white, false ORTHOCGOARGVAR);        
+              ViewElemDrawBox(G,&I->DragRect, I->DragStartFrame, I->DragStartFrame+1, n_frame, white, false, orthoCGO);
             if((I->DragCurFrame>=0) && (I->DragCurFrame<n_frame)) {
-              ViewElemDrawBox(G,&I->DragRect, I->DragCurFrame, I->DragCurFrame+1, n_frame, grey, true ORTHOCGOARGVAR);
+              ViewElemDrawBox(G,&I->DragRect, I->DragCurFrame, I->DragCurFrame+1, n_frame, grey, true, orthoCGO);
             }
           }
           break;
@@ -1802,19 +1820,19 @@ void CMovie::draw(CGO* orthoCGO)
             if(max_frame<0) max_frame = 0;
             if(min_frame>=n_frame) min_frame = n_frame - 1;
             if(max_frame>=n_frame) max_frame = n_frame - 1;
-            ViewElemDrawBox(G,&I->DragRect, min_frame, max_frame+1, n_frame, white, false ORTHOCGOARGVAR);        
-            ViewElemDrawBox(G,&I->DragRect, min_frame, max_frame+1, n_frame, grey, true ORTHOCGOARGVAR);
+            ViewElemDrawBox(G,&I->DragRect, min_frame, max_frame+1, n_frame, white, false, orthoCGO);
+            ViewElemDrawBox(G,&I->DragRect, min_frame, max_frame+1, n_frame, grey, true, orthoCGO);
           }
           break;
         case cMovieDragModeInsDel:
           if(I->DragCurFrame==I->DragStartFrame) {
-            ViewElemDrawBox(G,&I->DragRect, I->DragStartFrame, I->DragStartFrame, n_frame, white, true ORTHOCGOARGVAR);        
+            ViewElemDrawBox(G,&I->DragRect, I->DragStartFrame, I->DragStartFrame, n_frame, white, true, orthoCGO);
           } else if(I->DragCurFrame>=I->DragStartFrame) {
             float green[4] = {0.5F, 1.0F, 0.5F,0.5F};
-            ViewElemDrawBox(G,&I->DragRect, I->DragStartFrame, I->DragCurFrame, n_frame, green, true ORTHOCGOARGVAR);        
+            ViewElemDrawBox(G,&I->DragRect, I->DragStartFrame, I->DragCurFrame, n_frame, green, true, orthoCGO);
           } else {
             float red[4] = {1.0F, 0.5F, 0.5F,0.5F};          
-            ViewElemDrawBox(G,&I->DragRect, I->DragCurFrame, I->DragStartFrame, n_frame, red, true ORTHOCGOARGVAR);        
+            ViewElemDrawBox(G,&I->DragRect, I->DragCurFrame, I->DragStartFrame, n_frame, red, true, orthoCGO);
           }
           break;
         }

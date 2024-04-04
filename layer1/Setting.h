@@ -19,17 +19,19 @@ Z* -------------------------------------------------------------------
 
 #include <vector>
 #include <string>
+#include <unordered_map>
 
 #include"os_python.h"
 #include"PyMOLGlobals.h"
-#include"OVOneToOne.h"
+#include"pymol/memory.h"
+#include"Result.h"
 
 typedef char SettingName[255];
 
-/*
+/**
  * Setting record for atom/astate/bond/bstate level settings
  */
-typedef struct {
+struct SettingUniqueEntry {
   int setting_id;
   union {
     int int_;
@@ -37,16 +39,17 @@ typedef struct {
     float float3_[3];
   } value;
   int next;                     /* for per-atom setting lists & memory management */
-} SettingUniqueEntry;
-
-struct _CSettingUnique {
-  OVOneToOne *id2offset;
-  OVOneToOne *old2new;
-  SettingUniqueEntry *entry;
-  int n_alloc, next_free;
 };
 
-/*
+struct CSettingUnique {
+  std::unordered_map<int, int> id2offset;
+  std::unique_ptr<std::unordered_map<int, int>> old2new;
+  std::vector<SettingUniqueEntry> entry;
+  constexpr static int numInitEntries = 10;
+  int next_free{};
+};
+
+/**
  * Setting record for global/object/ostate level settings
  */
 struct SettingRec {
@@ -89,7 +92,9 @@ public:
   }
 
   void set_s(const char * value) {
-    if (!str_) {
+    if (!value) {
+      delete_s();
+    } else if (!str_) {
       str_ = new std::string(value);
     } else {
       str_->assign(value);
@@ -103,12 +108,6 @@ public:
       str_ = NULL;
     }
   }
-};
-
-struct _CSetting {
-  PyMOLGlobals *G;
-  ov_size size;
-  SettingRec *info;
 };
 
 #define cSetting_tuple      -1 // for get_setting_tuple
@@ -165,10 +164,9 @@ void SettingPurgeDefault(PyMOLGlobals * G);
 void SettingFreeGlobal(PyMOLGlobals * G);
 
 CSetting *SettingNew(PyMOLGlobals * G);
+CSetting* SettingCopyAll(PyMOLGlobals* G, const CSetting* src, CSetting* dst);
 void SettingFreeP(CSetting * I);
-void SettingInit(PyMOLGlobals * G, CSetting * I);
-void SettingPurge(CSetting * I);
-void SettingCheckHandle(PyMOLGlobals * G, CSetting ** handle);
+void SettingCheckHandle(PyMOLGlobals * G, pymol::copyable_ptr<CSetting>& handle);
 
 #define SettingSet_b SettingSet_i
 int SettingSet_i(CSetting * I, int index, int value);
@@ -184,8 +182,6 @@ const char * SettingGetTextPtr(PyMOLGlobals * G, const CSetting * set1, const CS
 int SettingUnset(CSetting * I, int index);
 
 void SettingRestoreDefault(CSetting * I, int index, const CSetting * src=NULL);
-
-bool SettingIsDefaultZero(int index);
 
 int SettingGetType(int index);
 inline int SettingGetType(PyMOLGlobals *, int index) {
@@ -260,27 +256,66 @@ int SettingCheckFontID(PyMOLGlobals * G, CSetting * set1, CSetting * set2, int f
 #define cStereo_clone_dynamic       12
 #define cStereo_openvr              13
 
-/*
+struct CSetting {
+  PyMOLGlobals* G;
+  SettingRec info[cSetting_INIT]{};
+
+  CSetting(PyMOLGlobals*);
+  CSetting(const CSetting&);
+  CSetting& operator=(const CSetting&);
+  ~CSetting();
+};
+
+namespace pymol
+{
+struct CObject;
+}
+
+/**
  * State index iterator which iterates either over a single state (state >= 0),
  * the current state (state == -2), or all states (state == -1). Takes
  * static singletons into account. Zero iterations if state >= nstate.
  *
- * StateIterator iter(G, I->Setting, state, I->NState);
- * while(iter.next()) {
- *   printf("in state %d\n", iter.state);
- * }
+ *     StateIterator iter(G, I->Setting, state, I->NState);
+ *     while (iter.next()) {
+ *         printf("in state %d\n", iter.state);
+ *     }
  */
 class StateIterator {
-  int end;
+  StateIndex_t end;
 
 public:
-  int state;
+  StateIndex_t state;
 
-  StateIterator(PyMOLGlobals * G, CSetting * set, int state_, int nstate);
+  StateIterator(PyMOLGlobals*, CSetting*, StateIndex_t, int nstate);
+  StateIterator(pymol::CObject*, StateIndex_t);
 
   bool next() {
     return (++state < end);
   };
+};
+
+/**
+ * Similar to StateIterator but easily useable
+ * with ranged-for loops
+ */
+class StateIteratorV2 {
+  StateIndex_t m_beg;
+  StateIndex_t m_end;
+  StateIndex_t m_cur;
+
+public:
+  StateIteratorV2(pymol::CObject*, StateIndex_t);
+
+  /**
+   * @return begin state iterator
+   */
+  StateIndex_t* begin();
+
+  /**
+   * @return end state iterator
+   */
+  StateIndex_t* end();
 };
 
 /*
@@ -306,12 +341,12 @@ extern const struct SettingLevelInfoType {
   unsigned char mask;
 } SettingLevelInfo[];
 
-const char * SettingLevelGetName(PyMOLGlobals * G, int index);
+const char * SettingLevelGetName(unsigned index);
 bool SettingLevelCheckMask(PyMOLGlobals * G, int index, unsigned char mask);
 bool SettingLevelCheck(PyMOLGlobals * G, int index, unsigned char level);
 
-bool CPyMOLInitSetting(OVLexicon * Lex, OVOneToOne * Setting);
-extern "C" OVreturn_word get_setting_id(CPyMOL * I, const char *setting);
+bool CPyMOLInitSetting(OVLexicon * Lex, std::unordered_map<int, int>& Setting);
+pymol::Result<int> get_setting_id(CPyMOL* I, const char* setting);
 
 /*
  * Overloaded setters for templatted programming
@@ -329,9 +364,9 @@ void SettingUniqueSet(PyMOLGlobals * G, int uid, int index, V value) {
   SettingUniqueSetTypedValue(G, uid, index, SettingGetType<V>(), &value);
 }
 
-template <typename V> void SettingSet(PyMOLGlobals * G, CSetting ** handle, int index, V value) {
+template <typename V> void SettingSet(PyMOLGlobals * G, pymol::copyable_ptr<CSetting>& handle, int index, V value) {
   SettingCheckHandle(G, handle);
-  SettingSet(*handle, index, value);
+  SettingSet(handle.get(), index, value);
 }
 
 // global setting
@@ -352,7 +387,7 @@ const CSetting * _SettingGetFirstDefined(int index,
     const CSetting * set1,
     const CSetting * set2);
 
-template <typename V> V SettingGet(int index, const CSetting *);
+template <typename V> V _SettingGet(int index, const CSetting *);
 template <typename V> V SettingGet(PyMOLGlobals * G,
     const CSetting * set1,
     const CSetting * set2, int index) {
@@ -362,7 +397,13 @@ template <typename V> V SettingGet(PyMOLGlobals * G, int index) {
   return SettingGet<V>(index, G->Setting);
 }
 
-/*
+template <typename V> V SettingGet(int index, const CSetting* set)
+{
+  using T = typename std::conditional<std::is_enum<V>::value, int, V>::type;
+  return static_cast<V>(_SettingGet<T>(index, set));
+}
+
+/**
  * Get setting value if it's defined in the given set, and assign value to
  * `out` variable and return true. Otherwise return false and leave `out`
  * untouched.
@@ -423,8 +464,8 @@ bool SettingUniqueGetTypedValuePtr(PyMOLGlobals * G, int unique_id, int index,
   return r;
 }
 
-/*
- * `SettingGetIfDefined` equivalent for unique settings.
+/**
+ * SettingGetIfDefined() equivalent for unique settings.
  */
 template <typename V>
 bool SettingUniqueGetIfDefined(PyMOLGlobals * G, int unique_id, int index, V * out) {

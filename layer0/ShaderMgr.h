@@ -19,10 +19,10 @@ Z* -------------------------------------------------------------------
 #include "os_gl.h"
 #include "PyMOLGlobals.h"
 #include "Executive_pre.h"
-#include "OVContext.h"
 #include "Rep.h"
 #include "GenericBuffer.h"
 #include "SceneDef.h"
+#include "ShaderPreprocessor.h"
 #include "PostProcess.h"
 #include <map>
 #include <set>
@@ -44,10 +44,6 @@ Z* -------------------------------------------------------------------
 #define LOCK_GUARD_MUTEX(name, var)
 #endif
 
-#ifndef GL_FRAGMENT_PROGRAM_ARB
-#define GL_FRAGMENT_PROGRAM_ARB                         0x8804
-#endif
-
 /* BEGIN PROPRIETARY CODE SEGMENT (see disclaimer in "os_proprietary.h") */
 #if 0
 PFNGLTEXIMAGE3DPROC getTexImage3D();
@@ -63,48 +59,61 @@ static PFNGLGETPROGRAMIVARBPROC glGetProgramivARB;
 
 class CShaderPrg {
 public:
-  const std::string name, geomfile, vertfile, fragfile;
+  struct GeometryShaderParams
+  {
+    std::string file = "";
+    GLenum input{};
+    GLenum output{};
+    int numVertsOut{};
+    GLuint id{};
+  };
+
+  struct TessellationShaderParams
+  {
+    std::string controlFile = "";
+    std::string evaluationFile = "";
+    GLuint controlID{};
+    GLuint evaluationID{};
+  };
+
+  const std::string name, vertfile, fragfile;
+  pymol::copyable_ptr<GeometryShaderParams> geomParams;
+  pymol::copyable_ptr<TessellationShaderParams> tessParams;
 
   std::map<int, std::string> uniformLocations;
-
-  GLenum gsInput, gsOutput;
-  int ngsVertsOut;
 
   std::string derivative;
   bool is_valid;
   bool is_linked;
 
-  CShaderPrg(PyMOLGlobals * G_,
-             const std::string &name,
-             const std::string &vertfile,
-             const std::string &fragfile,
-             const std::string &geomfile = "",
-             GLenum gsInput = 0,
-             GLenum gsOutput = 0,
-             int ngsVertsOut = 0) :
-    name(name),
-    geomfile(geomfile), vertfile(vertfile), fragfile(fragfile),
-    gsInput(gsInput), gsOutput(gsOutput), ngsVertsOut(ngsVertsOut),
-    is_valid(false), is_linked(false), G(G_),
-    id(0), gid(0), vid(0), fid(0), uniform_set(0) {}
-
-  ~CShaderPrg() {}
+  CShaderPrg(PyMOLGlobals* G_, const std::string& name,
+      const std::string& vertfile, const std::string& fragfile,
+      pymol::copyable_ptr<GeometryShaderParams> geomParams = nullptr,
+      pymol::copyable_ptr<TessellationShaderParams> tessParams = nullptr)
+      : name(name)
+      , geomParams(std::move(geomParams))
+      , tessParams(std::move(tessParams))
+      , vertfile(vertfile)
+      , fragfile(fragfile)
+      , is_valid(false)
+      , is_linked(false)
+      , G(G_)
+  {
+  }
 
   bool reload();
 
   /*
    * Create a derivative copy. This will reload with ShaderMgr::Reload_Derivatives.
    */
-  CShaderPrg * DerivativeCopy(const std::string &name, const std::string &variable) {
-    CShaderPrg * copy = new CShaderPrg(G, name, vertfile, fragfile, geomfile, gsInput, gsOutput, ngsVertsOut);
+  CShaderPrg* DerivativeCopy(
+      const std::string& name, const std::string& variable)
+  {
+    CShaderPrg* copy =
+        new CShaderPrg(G, name, vertfile, fragfile, geomParams, tessParams);
     copy->derivative = variable;
     return copy;
   }
-
-#ifdef _PYMOL_ARB_SHADERS
-  static CShaderPrg *NewARB(PyMOLGlobals * G, const char * name, const std::string& vert, const std::string& frag);
-  int DisableARB();
-#endif
 
 /* Enable */
   int Enable();
@@ -146,17 +155,16 @@ public:
   PyMOLGlobals * G;
 
   /* openGL assigned id */
-  int id;
+  int id{};
 
   /* openGL fragment and vertex shader ids */
-  GLuint gid;
-  GLuint vid;
-  GLuint fid;
+  GLuint vid{};
+  GLuint fid{};
 
   std::map<std::string, int> uniforms;
   std::map<std::string, int> attributes;
 
-  int uniform_set ; // bitmask
+  int uniform_set{}; // bitmask
 };
 
 /* ============================================================================
@@ -215,7 +223,7 @@ public:
   int RemoveShaderPrg(const std::string& name);
 
 /* GetShaderPrg -- gets a ptr to the installed shader */
-  CShaderPrg * GetShaderPrg(std::string name, short set_current_shader = 1, short pass = 0);
+  CShaderPrg * GetShaderPrg(std::string name, short set_current_shader = 1, RenderPass pass = RenderPass::Antialias);
 
   int ShaderPrgExists(const char * name);
 
@@ -227,41 +235,40 @@ public:
   void AddVBOToFree(GLuint vboid);
   void FreeAllVBOs();
 
-  CShaderPrg *Enable_DefaultShader(int pass);
-  CShaderPrg *Enable_LineShader(int pass);
-  CShaderPrg *Enable_SurfaceShader(int pass);
-  CShaderPrg *Enable_DefaultShaderWithSettings(const CSetting * set1, const CSetting * set2, int pass);
-  CShaderPrg *Enable_CylinderShader(const char *, int pass);
-  CShaderPrg *Enable_CylinderShader(int pass);
-  CShaderPrg *Enable_DefaultSphereShader(int pass);
-#ifdef _PYMOL_ARB_SHADERS
-  CShaderPrg *Enable_SphereShaderARB();
-#endif
+  CShaderPrg *Enable_DefaultShader(RenderPass pass);
+  CShaderPrg *Enable_LineShader(RenderPass pass);
+  CShaderPrg *Enable_SurfaceShader(RenderPass pass);
+  CShaderPrg *Enable_DefaultShaderWithSettings(const CSetting * set1, const CSetting * set2, RenderPass pass);
+  CShaderPrg *Enable_CylinderShader(const char *, RenderPass pass);
+  CShaderPrg *Enable_CylinderShader(RenderPass pass);
+  CShaderPrg *Enable_DefaultSphereShader(RenderPass pass);
   CShaderPrg *Enable_RampShader();
-  CShaderPrg *Enable_ConnectorShader(int pass);
+  CShaderPrg *Enable_ConnectorShader(RenderPass pass);
   CShaderPrg *Enable_TriLinesShader();
   CShaderPrg *Enable_ScreenShader();
-  CShaderPrg *Enable_LabelShader(int pass);
+  CShaderPrg *Enable_LabelShader(RenderPass pass);
   CShaderPrg *Enable_OITShader();
   CShaderPrg *Enable_OITCopyShader();
   CShaderPrg *Enable_IndicatorShader();
   CShaderPrg *Enable_BackgroundShader();
+  CShaderPrg* Enable_BezierShader();
 
   void Disable_Current_Shader();
 
   CShaderPrg *Get_ScreenShader();
-  CShaderPrg *Get_ConnectorShader(int pass);
-  CShaderPrg *Get_DefaultShader(int pass);
-  CShaderPrg *Get_LineShader(int pass);
-  CShaderPrg *Get_SurfaceShader(int pass);
-  CShaderPrg *Get_CylinderShader(int pass, short set_current_shader=1);
-  CShaderPrg *Get_CylinderNewShader(int pass, short set_current_shader=1);
-  CShaderPrg *Get_DefaultSphereShader(int pass);
+  CShaderPrg *Get_ConnectorShader(RenderPass pass);
+  CShaderPrg *Get_DefaultShader(RenderPass pass);
+  CShaderPrg *Get_LineShader(RenderPass pass);
+  CShaderPrg *Get_SurfaceShader(RenderPass pass);
+  CShaderPrg *Get_CylinderShader(RenderPass pass, short set_current_shader=1);
+  CShaderPrg *Get_CylinderNewShader(RenderPass pass, short set_current_shader=1);
+  CShaderPrg *Get_DefaultSphereShader(RenderPass pass);
   CShaderPrg *Get_RampShader();
   CShaderPrg *Get_Current_Shader();
   CShaderPrg *Get_IndicatorShader();
   CShaderPrg *Get_BackgroundShader();
-  CShaderPrg *Get_LabelShader(int pass);
+  CShaderPrg *Get_LabelShader(RenderPass pass);
+  CShaderPrg* Get_BezierShader();
 
   void Reload_CallComputeColorForLight();
   void Reload_All_Shaders();
@@ -283,6 +290,11 @@ public:
   int GetIsPicking();
 
   void SetPreprocVar(const std::string &key, bool value, bool invshaders = true);
+
+  /**
+   * @return a map of shader filenames to their raw source code
+   */
+  static std::map<std::string, const char*>* GetRawShaderCache();
 
 private:
   void freeAllGPUBuffers();
@@ -313,11 +325,7 @@ public:
      string lookups. */
 
 private:
-  // filename -> processed shader source, for #include preprocessor
-  std::map<std::string, std::string> shader_cache_processed;
-
-  // variable -> boolean value for #ifdef preprocessor
-  std::map<std::string, bool> preproc_vars;
+  ShaderPreprocessor m_shaderPreprocessor;
 
   std::unordered_map<size_t, gpuBuffer_t*> _gpu_object_map;
   std::vector<size_t> _gpu_objects_to_free_vector;
@@ -357,7 +365,7 @@ public:
    * Activates/Binds offscreen render target.
    * @param textureIdx offset of texture unit to assign (0 for GL_TEXTURE0, 1
    * for GL_TEXTURE1, etc...)
-   * @Note: indices should preferably be passed in as enum or named variable for
+   * @note: indices should preferably be passed in as enum or named variable for
    * clarity
    */
   void activateOffscreenTexture(GLuint textureIdx);
